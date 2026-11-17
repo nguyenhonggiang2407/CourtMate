@@ -44,6 +44,12 @@ Trình duyệt website ─── HTTPS ─────┤
 
 **Điểm cần phát triển tiếp:** xác thực nhân viên cloud theo tài khoản, backend làm nguồn lịch chính, chiến lược đồng bộ và chống xung đột, kiểm thử UI thực tế.
 
+### Tối ưu Cloud 2.3.1 (nhánh `optimize/v2.3.1`)
+
+Bản nâng cấp này sửa lỗi xác nhận giữ chỗ quá hạn; giới hạn bộ nhớ của rate limiter; thêm chỉ mục SQLite; hỗ trợ phân trang danh sách lịch quản trị và kiểm tra ngày xem lịch trống giống ngày tạo lịch. API mặc định giữ nguyên để tương thích ứng dụng Android 2.3. Bộ kiểm thử backend tăng từ **16 lên 21 bài**. Xem [báo cáo tối ưu và giới hạn](docs/OPTIMIZATION_2_3_1.md).
+
+
+
 ## Chạy Android
 
 1. Mở thư mục gốc (có `settings.gradle.kts`) bằng Android Studio.
