@@ -75,8 +75,7 @@ public class DashboardActivity extends ProtectedActivity {
                 ? View.VISIBLE : View.GONE);
         findViewById(R.id.btnDashboardStats).setVisibility(AuthSession.isAdmin()
                 ? View.VISIBLE : View.GONE);
-        findViewById(R.id.btnCloudBookings).setVisibility(AuthSession.isAdmin()
-                ? View.VISIBLE : View.GONE);
+        findViewById(R.id.btnCloudBookings).setVisibility(View.VISIBLE);
         findViewById(R.id.btnCloudBookings).setOnClickListener(v ->
                 startActivity(new Intent(this, CloudBookingsActivity.class)));
 

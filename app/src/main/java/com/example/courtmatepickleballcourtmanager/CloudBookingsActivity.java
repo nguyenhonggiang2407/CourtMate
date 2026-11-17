@@ -17,11 +17,12 @@ import org.json.JSONObject;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Cloud schedule operations, separate from offline SQLite management. Admin-only pilot. */
+/** Centralized cloud schedule; account roles are enforced by the API, not only by UI. */
 public final class CloudBookingsActivity extends ProtectedActivity {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
-    private CloudBookingRepository cloud;
-    private EditText url, token;
+    private volatile CloudBookingRepository cloud;
+    private EditText url, token, username, password, dateFilter;
+    private volatile String selectedDay;
     private TextView status;
     private LinearLayout list, courtList;
     private TextView summary;
@@ -35,6 +36,11 @@ public final class CloudBookingsActivity extends ProtectedActivity {
         toolbar.setNavigationOnClickListener(v -> finish());
         url = findViewById(R.id.cloudUrl);
         token = findViewById(R.id.cloudToken);
+        username = findViewById(R.id.cloudUsername);
+        password = findViewById(R.id.cloudPassword);
+        dateFilter = findViewById(R.id.cloudDateFilter);
+        selectedDay = com.example.courtmatepickleballcourtmanager.util.DateTimeUtils.today();
+        dateFilter.setText(selectedDay);
         status = findViewById(R.id.cloudStatus);
         list = findViewById(R.id.cloudList);
         courtList = findViewById(R.id.cloudCourtList);
@@ -42,38 +48,84 @@ public final class CloudBookingsActivity extends ProtectedActivity {
         add = findViewById(R.id.cloudAddBooking);
         findViewById(R.id.cloudConnect).setOnClickListener(v -> connect());
         findViewById(R.id.cloudRefresh).setOnClickListener(v -> refresh());
+        findViewById(R.id.cloudDisconnect).setOnClickListener(v -> disconnect());
         add.setOnClickListener(v -> addBooking());
         findViewById(R.id.cloudAddCourt).setOnClickListener(v -> addCourt());
         findViewById(R.id.cloudAddCourt).setEnabled(false);
         add.setEnabled(false);
     }
     private void connect() {
-        try {
-            cloud = new CloudBookingRepository(url.getText().toString(), token.getText().toString());
-            token.setText(""); // Token remains only in the repository memory, not preferences.
-            runNetwork(() -> {
-                JSONArray courts = cloud.courts();
-                runOnUiThread(() -> {
-                    add.setEnabled(true);
-                    findViewById(R.id.cloudAddCourt).setEnabled(true);
-                    status.setText("Đã kết nối HTTPS • " + courts.length() + " sân trên máy chủ");
-                });
-                loadRemote();
-            });
-        } catch (Exception e) {
-            status.setText(e.getMessage());
+        final String server = url.getText().toString();
+        final String user = username.getText().toString().trim();
+        final String secret = password.getText().toString();
+        final String oldToken = token.getText().toString();
+        try { selectedDay = checkedDay(); }
+        catch (Exception e) { status.setText(e.getMessage()); return; }
+        password.setText("");
+        token.setText("");
+        if (user.isEmpty() != secret.isEmpty()) {
+            status.setText("Cần nhập đầy đủ tài khoản và mật khẩu cloud");
+            return;
         }
+        runNetwork(() -> {
+            CloudBookingRepository next = !user.isEmpty() && !secret.isEmpty()
+                    ? CloudBookingRepository.login(server, user, secret)
+                    : new CloudBookingRepository(server, oldToken);
+            // Confirm authorization before marking the UI as connected.
+            JSONArray courts = next.courts();
+            cloud = next;
+            runOnUiThread(() -> {
+                if (cloud != next) return;
+                add.setEnabled(true);
+                findViewById(R.id.cloudAddCourt).setEnabled(next.isAdmin());
+                status.setText("Đã kết nối cloud • " + next.role() + " • "
+                        + courts.length() + " sân");
+            });
+            loadRemote();
+        });
+    }
+    private String checkedDay() {
+        String value = dateFilter.getText().toString().trim();
+        try {
+            java.text.SimpleDateFormat format = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US);
+            format.setLenient(false);
+            java.text.ParsePosition position = new java.text.ParsePosition(0);
+            if (format.parse(value, position) == null || position.getIndex() != value.length()
+                    || !format.format(format.parse(value)).equals(value))
+                throw new IllegalArgumentException("Ngày không hợp lệ");
+        } catch (Exception e) { throw new IllegalArgumentException("Ngày phải có dạng YYYY-MM-DD"); }
+        return value;
     }
     private void refresh() {
         if (cloud == null) { status.setText("Cần kết nối máy chủ trước"); return; }
+        try { selectedDay = checkedDay(); }
+        catch (Exception e) { status.setText(e.getMessage()); return; }
         runNetwork(this::loadRemote);
     }
+    private void disconnect() {
+        final CloudBookingRepository previous = cloud;
+        cloud = null;
+        add.setEnabled(false);
+        findViewById(R.id.cloudAddCourt).setEnabled(false);
+        list.removeAllViews();
+        courtList.removeAllViews();
+        summary.setText("Đã ngắt kết nối");
+        status.setText("Đã đóng phiên cloud trên ứng dụng");
+        if (previous != null) executor.execute(() -> {
+            try { previous.logout(); }
+            catch (Exception ignored) { /* Server session expires automatically; no stored secret. */ }
+        });
+    }
     private void loadRemote() throws Exception {
-        JSONArray courts = cloud.courts();
-        JSONObject metrics = cloud.summary();
-        JSONArray records = cloud.bookings();
+        CloudBookingRepository current = cloud;
+        if (current == null) return;
+        String day = selectedDay;
+        JSONArray courts = current.courts();
+        JSONObject metrics = current.summary(day);
+        JSONArray records = current.bookingsForDate(day);
         runOnUiThread(() -> {
-            summary.setText("Hôm nay " + metrics.optString("date")
+            if (cloud != current) return; // Never show customer data after logout.
+            summary.setText("Ngày " + metrics.optString("date")
                     + " • " + metrics.optInt("active_courts") + " sân hoạt động"
                     + "\nChờ xác nhận: " + metrics.optInt("pending")
                     + " • Đã xác nhận: " + metrics.optInt("confirmed")
@@ -96,7 +148,8 @@ public final class CloudBookingsActivity extends ProtectedActivity {
                 if (o == null) continue;
                 renderRow(o);
             }
-            status.setText("Đã tải " + records.length() + " lịch từ máy chủ • Không phải lịch SQLite cục bộ");
+            status.setText("Đang xem " + day + " • " + records.length()
+                    + " lịch cloud (tối đa 200/trang) • Chưa đồng bộ với SQLite");
         });
     }
     private void renderCourt(JSONObject court) {
@@ -115,6 +168,7 @@ public final class CloudBookingsActivity extends ProtectedActivity {
         name.setTextSize(14f);
         box.addView(name);
         MaterialButton toggle = actionButton(active ? "Tạm đóng sân" : "Mở nhận lịch");
+        if (cloud == null || !cloud.isAdmin()) return;
         box.addView(toggle);
         toggle.setOnClickListener(v -> new MaterialAlertDialogBuilder(this)
                 .setTitle(active ? "Tạm đóng sân trên cloud?" : "Mở nhận lịch trên cloud?")
@@ -157,7 +211,7 @@ public final class CloudBookingsActivity extends ProtectedActivity {
                     .setPositiveButton("Hủy lịch", (dialog,which) -> changeStatus(id,"CANCELLED"))
                     .setNegativeButton("Quay lại",null).show());
         }
-        if ("CONFIRMED".equals(o.optString("status"))
+        if (cloud != null && cloud.isAdmin() && "CONFIRMED".equals(o.optString("status"))
                 && !"PAID".equals(o.optString("payment_status"))) {
             MaterialButton pay = actionButton("Tạo link thanh toán đối tác (nếu đã kết nối)");
             box.addView(pay);
@@ -183,6 +237,7 @@ public final class CloudBookingsActivity extends ProtectedActivity {
         runNetwork(() -> { cloud.updateStatus(id,state); loadRemote(); });
     }
     private void addCourt() {
+        if (cloud != null && !cloud.isAdmin()) { status.setText("Chỉ Admin được thêm sân"); return; }
         if (cloud == null) { status.setText("Cần kết nối máy chủ trước"); return; }
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);

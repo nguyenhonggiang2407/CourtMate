@@ -20,6 +20,7 @@ def api(tmp_path, monkeypatch):
     import app
     app.init_db()
     app._public_attempts.clear()
+    app._login_attempts.clear()
     with TestClient(app.app) as c:
         yield c, app
 
@@ -261,6 +262,7 @@ def test_court_name_is_normalized(api):
 
 
 def test_expired_pending_hold_cannot_be_resurrected_by_admin(api):
+    """A new customer must not lose a slot to an expired old hold."""
     c, application = api
     c.post('/v1/admin/courts', headers=admin(), json={'name': 'San B', 'price_hour': 90000})
     first = c.post('/v1/public/bookings', json=book(today())).json()
@@ -296,6 +298,7 @@ def test_public_rate_limiter_bounded_memory_and_retry_after(api):
     for ip_num in range(4300):
         application.limit_public_bookings(SimpleNamespace(client=SimpleNamespace(host=f'demo-{ip_num}')))
     assert len(application._public_attempts) <= 4096
+    # Existing clients still see an actionable response when they exceed their quota.
     for _ in range(30):
         application.limit_public_bookings(SimpleNamespace(client=SimpleNamespace(host='repeat-client')))
     with pytest.raises(application.HTTPException) as exc:
@@ -327,3 +330,149 @@ def test_admin_booking_pagination_preserves_default_contract(api):
     assert not any('public_token' in row for row in page1.json() + page2.json())
     assert c.get('/v1/admin/bookings', headers=admin(), params={'limit':201}).status_code == 422
     assert c.get('/v1/admin/bookings', headers=admin(), params={'offset':-1}).status_code == 422
+
+
+def _staff_bootstrap(client):
+    return client.post('/v1/auth/bootstrap', headers=admin(), json={
+        'username':'Owner01','password':'OwnerPassword!2026'})
+
+
+def _staff_login(client, username='owner01', password='OwnerPassword!2026'):
+    return client.post('/v1/auth/login', json={'username':username,'password':password})
+
+
+def _bearer(session):
+    return {'Authorization':'Bearer '+session['access_token']}
+
+
+def test_cloud_staff_bootstrap_is_one_time_and_requires_admin_token(api):
+    c, application = api
+    credentials={'username':'Owner01','password':'OwnerPassword!2026'}
+    assert c.post('/v1/auth/bootstrap', json=credentials).status_code == 401
+    assert c.post('/v1/auth/bootstrap',headers={'Authorization':'Bearer '+('bad'*12)},json=credentials).status_code == 401
+    created = _staff_bootstrap(c)
+    assert created.status_code==201 and created.json()['username']=='owner01'
+    assert created.json()['role']=='ADMIN' and 'password' not in created.json()
+    assert _staff_bootstrap(c).status_code == 409
+    with application.connection() as db:
+        row=db.execute('SELECT * FROM staff_users WHERE username=?',('owner01',)).fetchone()
+    assert row['password_hash'] != 'OwnerPassword!2026'
+    assert len(row['password_salt']) == 32
+
+
+def test_staff_role_permissions_and_admin_management(api):
+    c, _ = api
+    _staff_bootstrap(c)
+    administrator = _staff_login(c).json()
+    admin_session=_bearer(administrator)
+    assert c.get('/v1/auth/me',headers=admin_session).json()['role']=='ADMIN'
+    staff = c.post('/v1/admin/staff',headers=admin_session,json={
+        'username':'Staff01','password':'StaffPassword!2026','role':'STAFF'})
+    assert staff.status_code == 201
+    assert staff.json()['role'] == 'STAFF'
+    clerk = _staff_login(c,'staff01','StaffPassword!2026').json()
+    session = _bearer(clerk)
+    assert c.get('/v1/auth/me',headers=session).json() == {
+        'username':'staff01','role':'STAFF','legacy':False}
+    assert c.get('/v1/admin/courts',headers=session).status_code == 200
+    assert c.get('/v1/admin/summary',headers=session).status_code == 200
+    assert c.get('/v1/admin/bookings',headers=session).status_code == 200
+    assert c.post('/v1/admin/courts',headers=session,json={'name':'Sân mới','price_hour':100000}).status_code == 403
+    assert c.get('/v1/admin/staff',headers=session).status_code == 403
+    assert c.post('/v1/admin/staff',headers=session,json={
+        'username':'Staff02','password':'StaffPassword!2026'}).status_code == 403
+    assert c.post('/v1/admin/courts',headers=admin_session,json={
+        'name':'Sân A','price_hour':100000}).status_code == 201
+    booking=c.post('/v1/admin/bookings',headers=session,json=book(today()))
+    assert booking.status_code == 201
+    assert c.post(f"/v1/admin/bookings/{booking.json()['id']}/bank-intent",headers=session).status_code == 403
+    assert c.post(f"/v1/admin/bookings/{booking.json()['id']}/status",headers=session,json={
+        'status':'CANCELLED'}).status_code == 200
+    listing=c.get('/v1/admin/staff',headers=admin_session).json()
+    assert len(listing) == 2
+    assert all('password_hash' not in row and 'password_salt' not in row for row in listing)
+
+
+def test_staff_disable_revokes_active_sessions_and_blocks_new_login(api):
+    c, _ = api
+    _staff_bootstrap(c)
+    superuser = _bearer(_staff_login(c).json())
+    new=c.post('/v1/admin/staff',headers=superuser,json={
+        'username':'Clerk01','password':'ClerkPassword!2026','role':'STAFF'}).json()
+    clerk=_bearer(_staff_login(c,'clerk01','ClerkPassword!2026').json())
+    assert c.get('/v1/admin/bookings',headers=clerk).status_code==200
+    stopped=c.patch(f"/v1/admin/staff/{new['id']}",headers=superuser,json={'active':False})
+    assert stopped.status_code==200
+    assert c.get('/v1/admin/bookings',headers=clerk).status_code==401
+    assert _staff_login(c,'clerk01','ClerkPassword!2026').status_code==401
+    assert c.patch(f"/v1/admin/staff/{new['id']}",headers=superuser,json={'active':True}).status_code==200
+    assert _staff_login(c,'clerk01','ClerkPassword!2026').status_code==200
+
+
+def test_logout_revokes_only_the_current_session(api):
+    c, _ = api
+    _staff_bootstrap(c)
+    token1=_bearer(_staff_login(c).json())
+    token2=_bearer(_staff_login(c).json())
+    assert c.post('/v1/auth/logout',headers=token1).json() == {'revoked':True}
+    assert c.get('/v1/auth/me',headers=token1).status_code == 401
+    assert c.get('/v1/auth/me',headers=token2).status_code == 200
+    assert c.post('/v1/auth/logout',headers=admin()).status_code==409
+
+
+def test_session_expiry_and_legacy_key_transition(api, monkeypatch):
+    c, application = api
+    _staff_bootstrap(c)
+    valid=_bearer(_staff_login(c).json())
+    with application.connection() as db:
+        db.execute("UPDATE staff_sessions SET expires_at='2000-01-01T00:00:00+00:00'")
+    assert c.get('/v1/auth/me',headers=valid).status_code==401
+    valid=_bearer(_staff_login(c).json())
+    monkeypatch.setenv('COURTMATE_ALLOW_LEGACY_ADMIN','false')
+    assert c.get('/v1/admin/summary',headers=admin()).status_code==401
+    assert c.get('/v1/admin/summary',headers=valid).status_code==200
+    assert c.post('/v1/auth/bootstrap',headers=admin(),json={
+        'username':'Another','password':'AnotherPassword!2026'}).status_code==401
+
+
+def test_last_active_admin_cannot_be_disabled(api):
+    c, _ = api
+    admin_user=_staff_bootstrap(c).json()
+    key=_bearer(_staff_login(c).json())
+    assert c.patch(f"/v1/admin/staff/{admin_user['id']}",headers=key,json={'active':False}).status_code==409
+    assert c.get('/v1/auth/me',headers=key).status_code==200
+
+
+def test_login_has_bounded_rate_limit(api):
+    c, application = api
+    _staff_bootstrap(c)
+    application._login_attempts.clear()
+    for _ in range(10):
+        assert _staff_login(c,'owner01','badPassword!123').status_code==401
+    exhausted=_staff_login(c)
+    assert exhausted.status_code==429 and exhausted.headers['Retry-After']=='300'
+    application._login_attempts.clear()
+    assert _staff_login(c).status_code==200
+
+
+def test_staff_conflict_and_validation(api):
+    c, _ = api
+    _staff_bootstrap(c)
+    session=_bearer(_staff_login(c).json())
+    duplicate=c.post('/v1/admin/staff',headers=session,json={
+        'username':'OWNER01','password':'AnotherPassword!2026','role':'STAFF'})
+    assert duplicate.status_code==409
+    assert c.post('/v1/admin/staff',headers=session,json={
+        'username':'xy','password':'short','role':'ADMIN'}).status_code==422
+    assert c.patch('/v1/admin/staff/999',headers=session,json={'active':False}).status_code==404
+
+
+def test_auth_schema_migrates_existing_cloud_data(api):
+    c, application = api
+    court = c.post('/v1/admin/courts',headers=admin(),json={'name':'Sân cũ','price_hour':100000}).json()
+    booking = c.post('/v1/admin/bookings',headers=admin(),json=book(today())).json()
+    application.init_db()  # rerun migration with existing cloud rows
+    assert c.get('/v1/admin/courts',headers=admin()).json()[0]['id'] == court['id']
+    assert c.get('/v1/admin/bookings',headers=admin()).json()[0]['id'] == booking['id']
+    assert _staff_bootstrap(c).status_code == 201
+    assert _staff_login(c).status_code == 200

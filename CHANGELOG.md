@@ -1,11 +1,19 @@
-## 2.3.1 — Tối ưu cloud (nhánh optimize/v2.3.1)
+## 2.4.0-demo — Cloud staff accounts và Android remote schedule
 
-- Chặn Admin xác nhận giữ chỗ PENDING đã hết hạn, đồng thời trả slot cho yêu cầu mới.
-- Giới hạn bộ nhớ rate limiter theo process, dọn IP không hoạt động và trả Retry-After khi HTTP 429.
-- Thêm SQLite index cho truy vấn theo ngày và lịch giữ chỗ sắp hết hạn.
-- API admin bookings hỗ trợ phân trang, tránh đọc public_token từ DB; availability kiểm tra khoảng ngày hợp lệ.
-- Tăng từ 16 lên 21 bài kiểm thử FastAPI, giữ tương thích phần Android và HTTP smoke test.
-- Chưa đồng bộ lịch SQLite Android/cloud và chưa có payment provider thực tế.
+- Backend: tạo Admin một lần, tạo/vô hiệu hóa tài khoản STAFF/ADMIN, login/logout, token phiên 12 giờ, RBAC theo endpoint.
+- Mật khẩu PBKDF2, salt riêng; token chỉ lưu dạng hash phía server; giới hạn đăng nhập theo IP+tài khoản trong mỗi process.
+- Android: đăng nhập HTTPS bằng tài khoản, thoát phiên, ẩn thao tác quản trị với Staff, lọc lịch/summary cloud theo ngày.
+- Có chế độ chuyển tiếp token quản trị legacy, cần chủ động tắt khi đã chuyển qua tài khoản nhân viên.
+- Chưa merge lịch offline và cloud; không bảo đảm tính nhất quán nếu vận hành hai nguồn đồng thời.
+
+## 2.3.1 (nhánh optimize/v2.3.1 — an toàn và tối ưu cloud)
+
+- Chặn quản trị viên xác nhận lịch công khai sau khi hold 20 phút đã hết hạn; không thể chiếm lại slot đã được trả về.
+- Giới hạn bộ nhớ rate limiter công khai: tối đa 4.096 địa chỉ IP đang hoạt động trong mỗi process, quét dọn theo thời gian và trả header `Retry-After: 60` khi vượt ngưỡng.
+- Thêm chỉ mục SQLite cho truy vấn lịch theo ngày và việc giải phóng hold đã hết hạn (tự tạo khi khởi động với DB hiện có).
+- API xem lịch trống giới hạn ngày 0–365 giống API tạo lịch; danh sách lịch quản trị hỗ trợ `limit` (1–200, mặc định 200) và `offset` (0–100.000).
+- Truy vấn danh sách Admin không đọc `public_token` từ database nữa; bảo toàn trường dữ liệu Android đang dùng.
+- Kiểm thử backend tăng từ 16 lên 21 bài; xác minh HTTP smoke thực tế. Chưa thay đổi giao diện Android/offline và chưa triển khai cloud production.
 
 ## 2.3.0 (nhánh upgrade/v2.3 — ổn định và demo)
 
