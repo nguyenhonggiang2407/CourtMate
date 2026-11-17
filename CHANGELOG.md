@@ -1,3 +1,12 @@
+## 2.5.0 — Change feed cloud, retry an toàn và cải tiến Android (nhánh feature/v2.5-sync-foundation)
+
+- Thêm bảng SQLite `cloud_changes` cùng trigger ghi sự kiện trong transaction, API staff `GET /v1/admin/changes` có cursor `seq`, phân trang và tombstone.
+- Tự backfill snapshot cho dữ liệu cloud cũ trong `init_db()`, không xóa lịch; cột mới `client_request_id` + unique index.
+- Cho phép tạo lịch nội bộ với mã gửi lại: cùng mã + nội dung trả lại một booking, mã tái sử dụng với nội dung khác bị từ chối.
+- Android: bộ chọn sân hoạt động, chọn ngày/giờ, xem 100 lịch/trang, gửi UUID cho lịch mới.
+- Bổ sung 8 bài kiểm thử backend (30 lên 38), smoke HTTP kiểm tra change feed và idempotency.
+- Chưa có đồng bộ SQLite offline hai chiều, audit log độc lập hay môi trường production. Chi tiết: [Release 2.5](docs/RELEASE_2_5.md).
+
 ## 2.4.0-demo — Cloud staff accounts và Android remote schedule
 
 - Backend: tạo Admin một lần, tạo/vô hiệu hóa tài khoản STAFF/ADMIN, login/logout, token phiên 12 giờ, RBAC theo endpoint.

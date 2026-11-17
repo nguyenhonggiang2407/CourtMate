@@ -156,11 +156,29 @@ public final class CloudBookingRepository {
         return new JSONArray(request("GET", "/v1/admin/bookings", null));
     }
     public JSONArray bookingsForDate(String day) throws Exception {
+        return bookingsForDate(day, 0, 200);
+    }
+    public JSONArray bookingsForDate(String day, int offset, int limit) throws Exception {
+        if (offset < 0 || offset > 100_000 || limit < 1 || limit > 200)
+            throw new IllegalArgumentException("Trang lịch không hợp lệ");
         return new JSONArray(request("GET", "/v1/admin/bookings?date=" + validatedDay(day)
-                + "&limit=200&offset=0", null));
+                + "&limit=" + limit + "&offset=" + offset, null));
+    }
+    /** Server-side ordered cursor. Not a local SQLite sync operation. */
+    public JSONObject changes(long after, int limit) throws Exception {
+        if (after < 0 || limit < 1 || limit > 200)
+            throw new IllegalArgumentException("Cursor không hợp lệ");
+        return new JSONObject(request("GET", "/v1/admin/changes?after=" + after
+                + "&limit=" + limit, null));
     }
     public JSONObject create(JSONObject values) throws Exception {
-        return new JSONObject(request("POST", "/v1/admin/bookings", values));
+        try {
+            return new JSONObject(request("POST", "/v1/admin/bookings", values));
+        } catch (java.io.IOException intermittent) {
+            // Retry only when the same request key makes network replay safe.
+            if (!values.has("client_request_id")) throw intermittent;
+            return new JSONObject(request("POST", "/v1/admin/bookings", values));
+        }
     }
     public JSONObject updateStatus(int id, String status) throws Exception {
         // PATCH support added to backend; do not use GET to change booking state.

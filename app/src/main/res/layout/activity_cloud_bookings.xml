@@ -95,6 +95,17 @@
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:layout_marginTop="18dp" android:textSize="18sp"
                 android:textStyle="bold" android:text="Danh sách đặt sân online" />
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:orientation="horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/cloudPreviousPage" android:layout_width="0dp"
+                    android:layout_weight="1" android:layout_height="wrap_content"
+                    style="@style/Widget.Material3.Button.OutlinedButton" android:text="Trang trước" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/cloudNextPage" android:layout_width="0dp"
+                    android:layout_weight="1" android:layout_height="wrap_content"
+                    style="@style/Widget.Material3.Button.OutlinedButton" android:text="Trang sau" />
+            </LinearLayout>
             <LinearLayout android:id="@+id/cloudList"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:layout_marginTop="14dp" android:orientation="vertical" />

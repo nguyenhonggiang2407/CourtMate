@@ -1,10 +1,14 @@
 package com.example.courtmatepickleballcourtmanager;
 
+import android.app.DatePickerDialog;
+import android.app.TimePickerDialog;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
 import android.widget.EditText;
+import android.widget.Spinner;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -14,6 +18,9 @@ import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -26,7 +33,9 @@ public final class CloudBookingsActivity extends ProtectedActivity {
     private TextView status;
     private LinearLayout list, courtList;
     private TextView summary;
-    private MaterialButton add;
+    private MaterialButton add, previousPage, nextPage;
+    private static final int PAGE_SIZE = 100;
+    private int currentPage = 0;
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         setContentView(R.layout.activity_cloud_bookings);
@@ -46,6 +55,27 @@ public final class CloudBookingsActivity extends ProtectedActivity {
         courtList = findViewById(R.id.cloudCourtList);
         summary = findViewById(R.id.cloudSummary);
         add = findViewById(R.id.cloudAddBooking);
+        previousPage = findViewById(R.id.cloudPreviousPage);
+        nextPage = findViewById(R.id.cloudNextPage);
+        previousPage.setEnabled(false);
+        nextPage.setEnabled(false);
+        previousPage.setOnClickListener(v -> {
+            if (cloud != null && currentPage > 0) {
+                currentPage--;
+                previousPage.setEnabled(false);
+                nextPage.setEnabled(false);
+                runNetwork(this::loadRemote);
+            }
+        });
+        nextPage.setOnClickListener(v -> {
+            if (cloud != null && nextPage.isEnabled()) {
+                currentPage++;
+                previousPage.setEnabled(false);
+                nextPage.setEnabled(false);
+                runNetwork(this::loadRemote);
+            }
+        });
+        attachDatePicker(dateFilter);
         findViewById(R.id.cloudConnect).setOnClickListener(v -> connect());
         findViewById(R.id.cloudRefresh).setOnClickListener(v -> refresh());
         findViewById(R.id.cloudDisconnect).setOnClickListener(v -> disconnect());
@@ -59,7 +89,7 @@ public final class CloudBookingsActivity extends ProtectedActivity {
         final String user = username.getText().toString().trim();
         final String secret = password.getText().toString();
         final String oldToken = token.getText().toString();
-        try { selectedDay = checkedDay(); }
+        try { selectedDay = checkedDay(); currentPage = 0; }
         catch (Exception e) { status.setText(e.getMessage()); return; }
         password.setText("");
         token.setText("");
@@ -98,14 +128,20 @@ public final class CloudBookingsActivity extends ProtectedActivity {
     }
     private void refresh() {
         if (cloud == null) { status.setText("Cần kết nối máy chủ trước"); return; }
-        try { selectedDay = checkedDay(); }
-        catch (Exception e) { status.setText(e.getMessage()); return; }
+        try {
+            String requested = checkedDay();
+            if (!requested.equals(selectedDay)) currentPage = 0;
+            selectedDay = requested;
+        } catch (Exception e) { status.setText(e.getMessage()); return; }
         runNetwork(this::loadRemote);
     }
     private void disconnect() {
         final CloudBookingRepository previous = cloud;
         cloud = null;
         add.setEnabled(false);
+        previousPage.setEnabled(false);
+        nextPage.setEnabled(false);
+        currentPage = 0;
         findViewById(R.id.cloudAddCourt).setEnabled(false);
         list.removeAllViews();
         courtList.removeAllViews();
@@ -120,11 +156,16 @@ public final class CloudBookingsActivity extends ProtectedActivity {
         CloudBookingRepository current = cloud;
         if (current == null) return;
         String day = selectedDay;
+        int page = currentPage;
         JSONArray courts = current.courts();
         JSONObject metrics = current.summary(day);
-        JSONArray records = current.bookingsForDate(day);
+        // Fetch one extra record so the next-page button is never a guess.
+        JSONArray records = current.bookingsForDate(day, page * PAGE_SIZE, PAGE_SIZE + 1);
+        boolean more = records.length() > PAGE_SIZE;
         runOnUiThread(() -> {
-            if (cloud != current) return; // Never show customer data after logout.
+            if (cloud != current || currentPage != page || !selectedDay.equals(day)) return;
+            previousPage.setEnabled(page > 0);
+            nextPage.setEnabled(more);
             summary.setText("Ngày " + metrics.optString("date")
                     + " • " + metrics.optInt("active_courts") + " sân hoạt động"
                     + "\nChờ xác nhận: " + metrics.optInt("pending")
@@ -143,13 +184,13 @@ public final class CloudBookingsActivity extends ProtectedActivity {
                 empty.setText("Chưa có lịch online. Lịch offline không đồng bộ ở phiên bản này.");
                 list.addView(empty);
             }
-            for (int i=0;i<records.length();i++) {
+            for (int i=0;i<Math.min(records.length(), PAGE_SIZE);i++) {
                 JSONObject o = records.optJSONObject(i);
                 if (o == null) continue;
                 renderRow(o);
             }
-            status.setText("Đang xem " + day + " • " + records.length()
-                    + " lịch cloud (tối đa 200/trang) • Chưa đồng bộ với SQLite");
+            status.setText("Đang xem " + day + " • Trang " + (page + 1) + " • "
+                    + Math.min(records.length(), PAGE_SIZE) + " lịch • Chưa đồng bộ với SQLite");
         });
     }
     private void renderCourt(JSONObject court) {
@@ -265,15 +306,32 @@ public final class CloudBookingsActivity extends ProtectedActivity {
         });
     }
     private void formBooking(JSONArray courts) {
-        if (courts.length() == 0) { status.setText("Hãy thêm sân trên máy chủ trước"); return; }
+        ArrayList<Integer> ids = new ArrayList<>();
+        ArrayList<String> descriptions = new ArrayList<>();
+        for (int i = 0; i < courts.length(); i++) {
+            JSONObject court = courts.optJSONObject(i);
+            if (court == null || court.optInt("active") != 1) continue;
+            ids.add(court.optInt("id"));
+            descriptions.add(court.optString("name") + " • "
+                    + court.optLong("price_hour") + " đ/giờ");
+        }
+        if (ids.isEmpty()) { status.setText("Chưa có sân cloud đang nhận lịch mới"); return; }
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
-        form.setPadding(dp(18),dp(8),dp(18),dp(4));
-        String[] labels = {"Mã sân (xem danh sách)","Ngày YYYY-MM-DD", "Bắt đầu HH:mm",
-                "Kết thúc HH:mm", "Tên khách", "Số điện thoại"};
-        String[] values = {""+courts.optJSONObject(0).optInt("id"),
-                com.example.courtmatepickleballcourtmanager.util.DateTimeUtils.today(),
-                "18:00","19:00","",""};
+        form.setPadding(dp(18), dp(8), dp(18), dp(4));
+        TextView courtLabel = new TextView(this);
+        courtLabel.setText("Chọn sân trên cloud");
+        form.addView(courtLabel);
+        Spinner selectedCourt = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, descriptions);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        selectedCourt.setAdapter(adapter);
+        form.addView(selectedCourt);
+        String[] labels = {"Ngày YYYY-MM-DD", "Bắt đầu HH:mm", "Kết thúc HH:mm",
+                "Tên khách", "Số điện thoại"};
+        String[] values = {com.example.courtmatepickleballcourtmanager.util.DateTimeUtils.today(),
+                "18:00", "19:00", "", ""};
         EditText[] entries = new EditText[labels.length];
         for (int i=0;i<labels.length;i++) {
             entries[i] = new EditText(this);
@@ -282,22 +340,56 @@ public final class CloudBookingsActivity extends ProtectedActivity {
             entries[i].setText(values[i]);
             form.addView(entries[i]);
         }
+        attachDatePicker(entries[0]);
+        attachTimePicker(entries[1]);
+        attachTimePicker(entries[2]);
         new MaterialAlertDialogBuilder(this)
                 .setTitle("Tạo lịch online")
                 .setView(form)
                 .setPositiveButton("Lưu lên máy chủ", (dialog,which) -> {
                     try {
                         JSONObject order = new JSONObject()
-                                .put("court_id", Integer.parseInt(entries[0].getText().toString().trim()))
-                                .put("date", entries[1].getText().toString().trim())
-                                .put("start", entries[2].getText().toString().trim())
-                                .put("end", entries[3].getText().toString().trim())
-                                .put("customer_name", entries[4].getText().toString().trim())
-                                .put("customer_phone", entries[5].getText().toString().trim());
+                                .put("court_id", ids.get(selectedCourt.getSelectedItemPosition()))
+                                .put("date", entries[0].getText().toString().trim())
+                                .put("start", entries[1].getText().toString().trim())
+                                .put("end", entries[2].getText().toString().trim())
+                                .put("customer_name", entries[3].getText().toString().trim())
+                                .put("customer_phone", entries[4].getText().toString().trim())
+                                .put("client_request_id", java.util.UUID.randomUUID().toString());
+                        currentPage = 0;
                         runNetwork(() -> { cloud.create(order); loadRemote(); });
-                    } catch (Exception e) { status.setText(e.getMessage()); }
+                    } catch (Exception e) { status.setText("Dữ liệu không hợp lệ: " + e.getMessage()); }
                 })
                 .setNegativeButton("Hủy",null).show();
+    }
+    private void attachDatePicker(EditText edit) {
+        edit.setFocusable(false);
+        edit.setOnClickListener(v -> {
+            Calendar calendar = Calendar.getInstance();
+            try {
+                String[] parts = edit.getText().toString().split("-");
+                calendar.set(Integer.parseInt(parts[0]),Integer.parseInt(parts[1])-1,
+                        Integer.parseInt(parts[2]));
+            } catch (Exception ignored) { /* Use current date. */ }
+            new DatePickerDialog(this, (view, year, month, day) -> edit.setText(
+                    String.format(Locale.US, "%04d-%02d-%02d", year, month+1, day)),
+                    calendar.get(Calendar.YEAR),calendar.get(Calendar.MONTH),
+                    calendar.get(Calendar.DAY_OF_MONTH)).show();
+        });
+    }
+    private void attachTimePicker(EditText edit) {
+        edit.setFocusable(false);
+        edit.setOnClickListener(v -> {
+            int hour = 18, minute = 0;
+            try {
+                String[] parts = edit.getText().toString().split(":");
+                hour = Integer.parseInt(parts[0]);
+                minute = Integer.parseInt(parts[1]);
+            } catch (Exception ignored) { /* 18:00 default. */ }
+            new TimePickerDialog(this, (view, h, m) -> edit.setText(
+                    String.format(Locale.US, "%02d:%02d", h, m)),
+                    hour, minute, true).show();
+        });
     }
     private interface Work { void run() throws Exception; }
     private void runNetwork(Work work) {

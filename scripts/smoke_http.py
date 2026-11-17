@@ -81,7 +81,16 @@ def main() -> None:
             code, cancelled = request(url, "/v1/public/bookings/cancel", "POST", {"id": created["id"], "access_token": created["access_token"]})
             assert code == 200 and cancelled["status"] == "CANCELLED", (code, cancelled)
             assert request(url, "/v1/public/bookings", "POST", booking)[0] == 201
-            print("HTTP smoke OK: /health, website, access control, courts, booking, conflict, status, cancel, slot reuse")
+            code, feed = request(url, "/v1/admin/changes?after=0&limit=50", token=token)
+            assert code == 200 and feed["next_cursor"] > 0
+            assert any(x["resource"] == "booking" for x in feed["events"])
+            assert "public_token" not in json.dumps(feed)
+            unique = {**booking, "start": "12:00", "end": "13:00",
+                      "client_request_id": "smoke-booking-retry-2026"}
+            code, first = request(url, "/v1/admin/bookings", "POST", unique, token)
+            code2, again = request(url, "/v1/admin/bookings", "POST", unique, token)
+            assert code == code2 == 201 and first["id"] == again["id"]
+            print("HTTP smoke OK: health, website, RBAC, booking conflict/cancel, change-feed, idempotent retry")
         finally:
             process.terminate()
             try:
