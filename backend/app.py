@@ -43,7 +43,7 @@ async def lifespan(_app: FastAPI):
     init_db()
     yield
 
-app = FastAPI(title="CourtMate Cloud pilot", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="CourtMate Cloud pilot", version="0.5.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 # A bounded, per-process best-effort limiter for the demo. A shared Redis/WAF
 # limiter is needed for multiple workers or a production deployment.
@@ -155,7 +155,45 @@ def init_db():
             event_id TEXT PRIMARY KEY, booking_id INTEGER NOT NULL REFERENCES bookings(id),
             provider_reference TEXT NOT NULL, amount INTEGER NOT NULL,
             event_type TEXT NOT NULL, created_at TEXT NOT NULL);
+        -- Monotonic, server-owned change cursor. Never use clock time as a sync cursor.
+        CREATE TABLE IF NOT EXISTS cloud_changes (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            resource TEXT NOT NULL CHECK(resource IN ('court','booking')),
+            resource_id INTEGER NOT NULL,
+            action TEXT NOT NULL CHECK(action IN ('UPSERT','DELETE')),
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+        CREATE TRIGGER IF NOT EXISTS cloud_court_insert AFTER INSERT ON courts
+          BEGIN INSERT INTO cloud_changes(resource,resource_id,action) VALUES ('court',NEW.id,'UPSERT'); END;
+        CREATE TRIGGER IF NOT EXISTS cloud_court_update AFTER UPDATE ON courts
+          BEGIN INSERT INTO cloud_changes(resource,resource_id,action) VALUES ('court',NEW.id,'UPSERT'); END;
+        CREATE TRIGGER IF NOT EXISTS cloud_court_delete AFTER DELETE ON courts
+          BEGIN INSERT INTO cloud_changes(resource,resource_id,action) VALUES ('court',OLD.id,'DELETE'); END;
+        CREATE TRIGGER IF NOT EXISTS cloud_booking_insert AFTER INSERT ON bookings
+          BEGIN INSERT INTO cloud_changes(resource,resource_id,action) VALUES ('booking',NEW.id,'UPSERT'); END;
+        CREATE TRIGGER IF NOT EXISTS cloud_booking_update AFTER UPDATE ON bookings
+          BEGIN INSERT INTO cloud_changes(resource,resource_id,action) VALUES ('booking',NEW.id,'UPSERT'); END;
+        CREATE TRIGGER IF NOT EXISTS cloud_booking_delete AFTER DELETE ON bookings
+          BEGIN INSERT INTO cloud_changes(resource,resource_id,action) VALUES ('booking',OLD.id,'DELETE'); END;
         ''')
+        # Safe, one-time snapshot for databases created before the change log.
+        # Re-running init_db must never duplicate migration events.
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            # Add the client retry key in-place for pre-2.5 SQLite files.
+            columns = {r['name'] for r in db.execute('PRAGMA table_info(bookings)')}
+            if 'client_request_id' not in columns:
+                db.execute('ALTER TABLE bookings ADD COLUMN client_request_id TEXT')
+            db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_request_id '
+                       'ON bookings(client_request_id) WHERE client_request_id IS NOT NULL')
+            if db.execute("SELECT 1 FROM cloud_changes LIMIT 1").fetchone() is None:
+                db.execute("INSERT INTO cloud_changes(resource,resource_id,action) "
+                           "SELECT 'court',id,'UPSERT' FROM courts ORDER BY id")
+                db.execute("INSERT INTO cloud_changes(resource,resource_id,action) "
+                           "SELECT 'booking',id,'UPSERT' FROM bookings ORDER BY id")
+            db.execute("COMMIT")
+        except Exception:
+            db.execute("ROLLBACK")
+            raise
 
 
 def _auth_header(authorization: str | None) -> str:
@@ -368,6 +406,9 @@ class BookingCreate(BaseModel):
     end: str
     customer_name: str = Field(min_length=2, max_length=100)
     customer_phone: str = Field(pattern=r"^[0-9]{9,11}$")
+    # Optional admin-only idempotency key for intermittent network retries.
+    client_request_id: str | None = Field(default=None, min_length=16, max_length=80,
+                                           pattern=r"^[a-zA-Z0-9_-]+$")
 
     @field_validator("date")
     @classmethod
@@ -395,6 +436,8 @@ def booking_to_dict(row):
 
 
 def create_booking(payload: BookingCreate, public: bool):
+    if public and payload.client_request_id is not None:
+        raise HTTPException(422, "Mã gửi lại chỉ áp dụng cho nhân viên")
     if payload.end <= payload.start:
         raise HTTPException(422, "Giờ kết thúc phải lớn hơn giờ bắt đầu; chưa hỗ trợ qua 0h")
     # A same-day booking must not reserve a slot that has already started.
@@ -410,6 +453,15 @@ def create_booking(payload: BookingCreate, public: bool):
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            if not public and payload.client_request_id:
+                prior = db.execute("SELECT * FROM bookings WHERE client_request_id=?",
+                                   (payload.client_request_id,)).fetchone()
+                if prior is not None:
+                    fields = ("court_id","date","start","end","customer_name","customer_phone")
+                    if any(prior[field] != getattr(payload,field) for field in fields):
+                        raise HTTPException(409, "Mã gửi lại đã được dùng cho một lịch khác")
+                    db.execute("COMMIT")
+                    return booking_to_dict(prior)
             expire_holds(db)
             court = db.execute("SELECT * FROM courts WHERE id=? AND active=1", (payload.court_id,)).fetchone()
             if court is None:
@@ -426,11 +478,12 @@ def create_booking(payload: BookingCreate, public: bool):
             status = "PENDING" if public else "CONFIRMED"
             cur = db.execute('''INSERT INTO bookings
                (court_id,date,start,end,customer_name,customer_phone,amount,status,
-               payment_status,created_at,hold_until,updated_at,public_token)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+               payment_status,created_at,hold_until,updated_at,public_token,client_request_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                (payload.court_id, payload.date, payload.start, payload.end,
                 payload.customer_name, payload.customer_phone, amount, status,
-                "UNPAID", now, hold, now, secrets.token_urlsafe(24)))
+                "UNPAID", now, hold, now, secrets.token_urlsafe(24),
+                payload.client_request_id if not public else None))
             row = db.execute("SELECT * FROM bookings WHERE id=?", (cur.lastrowid,)).fetchone()
             db.execute("COMMIT")
             return booking_to_dict(row)
@@ -644,6 +697,60 @@ def admin_summary(date: str | None = None):
             return {"date": selected, "active_courts": active_courts, **dict(counts)}
         except Exception:
             db.execute("ROLLBACK")
+            raise
+
+
+@app.get("/v1/admin/changes", dependencies=[Depends(require_staff)])
+def admin_changes(after: int = Query(default=0, ge=0),
+                  limit: int = Query(default=100, ge=1, le=200)):
+    """Read a monotonic cloud change feed, intended for eventual client upserts.
+
+    Apply events in seq order, persisting next_cursor only after the whole page.
+    Records are current snapshots, not historical states. This does NOT
+    synchronize the legacy Android offline SQLite database.
+    """
+    with connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            # Expiring a reservation must emit a change for connected clients.
+            expire_holds(db)
+            pages = db.execute(
+                "SELECT seq,resource,resource_id,action,created_at "
+                "FROM cloud_changes WHERE seq>? ORDER BY seq ASC LIMIT ?",
+                (after, limit + 1)).fetchall()
+            more = len(pages) > limit
+            pages = pages[:limit]
+            court_ids = sorted({p['resource_id'] for p in pages if p['resource']=='court'})
+            booking_ids = sorted({p['resource_id'] for p in pages if p['resource']=='booking'})
+            courts = {}
+            if court_ids:
+                placeholders = ','.join('?' for _ in court_ids)
+                courts = {r['id']: dict(r) for r in db.execute(
+                    f'SELECT id,name,price_hour,active FROM courts WHERE id IN ({placeholders})', court_ids)}
+            bookings = {}
+            if booking_ids:
+                placeholders = ','.join('?' for _ in booking_ids)
+                # Explicit projection: never expose the private public_token.
+                rows = db.execute(
+                    'SELECT b.id,b.court_id,b.date,b.start,b.end,b.customer_name,'
+                    'b.customer_phone,b.amount,b.status,b.payment_status,b.payment_reference,'
+                    'b.payment_url,b.paid_at,b.created_at,b.hold_until,b.updated_at,'
+                    'c.name AS court_name FROM bookings b JOIN courts c ON b.court_id=c.id '
+                    f'WHERE b.id IN ({placeholders})', booking_ids)
+                bookings = {r['id']: dict(r) for r in rows}
+            events = []
+            for item in pages:
+                event = dict(item)
+                event['record'] = (courts if item['resource']=='court' else bookings).get(item['resource_id'])
+                # A deleted record is always returned as a tombstone.
+                if event['record'] is None:
+                    event['action'] = 'DELETE'
+                events.append(event)
+            db.execute("COMMIT")
+            return {'events': events, 'next_cursor': events[-1]['seq'] if events else after,
+                    'has_more': more, 'server_time': iso_now()}
+        except Exception:
+            if db.in_transaction: db.execute('ROLLBACK')
             raise
 
 

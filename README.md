@@ -1,10 +1,10 @@
-> **CourtMate 2.4.0 demo (branch feature/v2.4-cloud-staff):** đã bổ sung đăng nhập cloud từng nhân viên, phân quyền trên API, quản lý/thu hồi phiên, lọc lịch cloud theo ngày từ Android. CI Android và kiểm thử backend được chạy ở nhánh riêng trước khi merge. **Lịch SQLite offline chưa đồng bộ hai chiều với lịch cloud.** Xem [ghi chú bản 2.4](docs/RELEASE_2_4.md) và [tài liệu Cloud API](backend/README.md).
+> **CourtMate 2.5.0 — nhánh thử nghiệm `feature/v2.5-sync-foundation`:** bổ sung change feed có cursor, chống gửi trùng lịch bằng `client_request_id`, Android chọn sân/ngày/giờ và phân trang. **Chưa đồng bộ SQLite offline hai chiều; không vận hành đồng thời hai lịch độc lập cho cùng sân.** Xem [Release 2.5](docs/RELEASE_2_5.md).
 
 # CourtMate — Quản lý sân Pickleball
 
-**Android (Java/XML/SQLite) · Python/FastAPI · Demo website · v2.3 (nhánh phát triển)**
+**Android (Java/XML/SQLite) · Python/FastAPI · Demo website · v2.5 (nhánh thử nghiệm)**
 
-[![CourtMate CI](https://github.com/nguyenhonggiang2407/CourtMate/actions/workflows/ci.yml/badge.svg?branch=upgrade%2Fv2.3)](https://github.com/nguyenhonggiang2407/CourtMate/actions/workflows/ci.yml?query=branch%3Aupgrade%2Fv2.3) · [Demo tương tác](demo/index.html) · [Tài liệu triển khai](docs/DEPLOY_DEMO.md) · [Kiểm thử Android](docs/QA_ANDROID.md)
+[![CourtMate CI](https://github.com/nguyenhonggiang2407/CourtMate/actions/workflows/ci.yml/badge.svg?branch=feature%2Fv2.5-sync-foundation)](https://github.com/nguyenhonggiang2407/CourtMate/actions/workflows/ci.yml?query=branch%3Afeature%2Fv2.5-sync-foundation) · [Demo tương tác](demo/index.html) · [Tài liệu triển khai](docs/DEPLOY_DEMO.md) · [Kiểm thử Android](docs/QA_ANDROID.md)
 
 CourtMate là đồ án/portfolio xây dựng quy trình quản lý sân Pickleball từ đặt lịch đến nhận sân, dịch vụ, cọc, hóa đơn và báo cáo. Phần Android hỗ trợ vận hành tại sân với SQLite cục bộ; phần FastAPI là **lịch cloud riêng** cho website đặt trước và các máy quản lý truy cập online.
 
@@ -36,7 +36,7 @@ CourtMate là đồ án/portfolio xây dựng quy trình quản lý sân Pickleb
   ├── Activity / một phần ViewModel + Repository
   ├── SQLite cục bộ (lịch và hóa đơn offline)
   └── CloudBookingRepository ─────┐
-                                    │ HTTPS / token quản trị thí điểm
+                                    │ HTTPS / phiên đăng nhập Staff hoặc Admin
 Trình duyệt website ─── HTTPS ─────┤
                                     ▼
                            FastAPI (backend/app.py)
@@ -44,13 +44,21 @@ Trình duyệt website ─── HTTPS ─────┤
                            SQLite cloud riêng
 ```
 
-**Điểm cần phát triển tiếp:** xác thực nhân viên cloud theo tài khoản, backend làm nguồn lịch chính, chiến lược đồng bộ và chống xung đột, kiểm thử UI thực tế.
+**Điểm cần phát triển tiếp:** Android SQLite offline vẫn tách với lịch cloud; chưa có outbox/reconciliation hai chiều, và kiểm thử UI trên thiết bị vẫn phải thực hiện.
 
 ### Tối ưu Cloud 2.3.1 (nhánh `optimize/v2.3.1`)
 
 Bản nâng cấp này sửa lỗi xác nhận giữ chỗ quá hạn; giới hạn bộ nhớ của rate limiter; thêm chỉ mục SQLite; hỗ trợ phân trang danh sách lịch quản trị và kiểm tra ngày xem lịch trống giống ngày tạo lịch. API mặc định giữ nguyên để tương thích ứng dụng Android 2.3. Bộ kiểm thử backend tăng từ **16 lên 21 bài**. Xem [báo cáo tối ưu và giới hạn](docs/OPTIMIZATION_2_3_1.md).
 
 
+
+### Thử nghiệm 2.5 — Nền tảng đồng bộ cloud và UX Android
+
+- API `GET /v1/admin/changes?after=0&limit=100` trả sự kiện sân/lịch theo cursor `seq` tăng dần; một bản ghi được đọc từ trạng thái **hiện tại**, không phải event-sourcing hoặc lịch sử giao dịch.
+- API nội bộ tạo lịch nhận `client_request_id` tùy chọn để gửi lại an toàn khi mạng bị gián đoạn. Backend giữ nguyên quy tắc chặn hai lịch trùng sân/giờ.
+- Android Cloud thêm bộ chọn sân, ngày/giờ và phân trang 100 lịch; không tự đưa lịch offline vào cloud.
+- Kiểm thử backend bổ sung các trường hợp phân trang feed, quyền Staff, dữ liệu cũ, lịch hết hạn, khóa trùng từ nhiều request và trường hợp xóa. **37 bài đạt tại môi trường phát triển**; cần xem GitHub CI để xác nhận build APK nhánh mới.
+- [Ghi chú triển khai, giới hạn và checklist 2.5](docs/RELEASE_2_5.md).
 
 ## Chạy Android
 
@@ -103,7 +111,7 @@ HTTP smoke script khởi chạy Uvicorn trên cổng localhost ngẫu nhiên, t�
 ## Lộ trình
 
 1. **2.3**: CI Android, APK debug, smoke test HTTP, chuẩn hóa README/demo, cấu hình deploy static.
-2. **2.5**: một nguồn lịch chuẩn trên cloud, đồng bộ Android, phân quyền per-staff và bộ kiểm thử xung đột đa thiết bị.
-3. **3.0**: PostgreSQL, thông báo, đối soát và refund, báo cáo quản trị, bảo mật và kiểm thử production.
+2. **2.5 (nền tảng)**: change feed và retry an toàn trên cloud, UX Android tốt hơn; **chưa** gộp database offline/cloud.
+3. **2.6 / 3.0**: chuyển local booking sang server chuẩn với outbox, kiểm thử mất mạng; sau đó PostgreSQL, thông báo, đối soát và vận hành production.
 
-Tài liệu: [Release 2.3](docs/RELEASE_2_3.md) · [Demo Script](docs/DEMO_SCRIPT.md) · [API backend](backend/README.md) · [Changelog](CHANGELOG.md).
+Tài liệu: [Release 2.5](docs/RELEASE_2_5.md) · [Demo Script](docs/DEMO_SCRIPT.md) · [API backend](backend/README.md) · [Changelog](CHANGELOG.md).

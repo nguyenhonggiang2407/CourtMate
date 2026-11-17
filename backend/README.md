@@ -124,3 +124,13 @@ password is embedded in the project.
 (up to 200 results) across devices. It does **not** push local SQLite reservations
 to the server, merge conflicts, or synchronize local invoices/payments. Avoid
 using offline and cloud schedules in parallel for the same physical court.
+
+## CourtMate 2.5 — Change feed & an toàn khi gửi lại
+
+- `GET /v1/admin/changes?after=0&limit=100` dành cho Admin/Staff. Trả `events`, `next_cursor`, `has_more`, `server_time`, theo thứ tự `seq` tăng dần. Mỗi event có `resource` (`court`/`booking`), `resource_id`, `action`, `record`. Sự kiện `DELETE` có `record=null`. `public_token` không xuất hiện trong feed.
+- Cursor là số tăng dần do SQLite server tạo, không dựa vào giờ thiết bị. Chỉ lưu cursor sau khi client đã áp dụng thành công toàn bộ trang. Dữ liệu trong `record` là trạng thái hiện tại, không phải ảnh chụp lịch sử.
+- API tạo lịch nội bộ (`POST /v1/admin/bookings`) nhận `client_request_id` tùy chọn (16–80 ký tự chữ/số/gạch nối/gạch dưới). Gửi lại cùng mã và cùng thông tin trả về cùng booking; cùng mã nhưng payload thay đổi trả `409`. Public booking không chấp nhận trường này. Mã giúp client retry với **cùng id**, không thay thế queue offline.
+- `init_db()` tự bổ sung cột & index idempotency, tạo trigger change feed; nếu DB cũ có lịch nhưng chưa có event, lần đầu sẽ tạo snapshot. Nên sao lưu và chạy thử migration trước khi nâng cấp server đang dùng.
+- Android Cloud có trang 100 lịch, dropdown sân hoạt động, chọn ngày giờ; **SQLite Android offline vẫn chưa đồng bộ hai chiều**. Chỉ sử dụng một nguồn lịch cho mỗi sân khi vận hành demo.
+
+Xem [ghi chú kỹ thuật 2.5](../docs/RELEASE_2_5.md) và quy trình QA. Token quản trị dùng chung còn bật mặc định chỉ để tương thích; hãy tắt `COURTMATE_ALLOW_LEGACY_ADMIN` sau khi tạo tài khoản Admin/Staff.

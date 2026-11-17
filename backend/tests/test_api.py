@@ -476,3 +476,137 @@ def test_auth_schema_migrates_existing_cloud_data(api):
     assert c.get('/v1/admin/bookings',headers=admin()).json()[0]['id'] == booking['id']
     assert _staff_bootstrap(c).status_code == 201
     assert _staff_login(c).status_code == 200
+
+
+def test_change_feed_requires_staff_and_never_leaks_private_token(api):
+    c, application = api
+    assert c.get('/v1/admin/changes').status_code == 401
+    assert c.get('/v1/admin/changes', headers=admin(), params={'after': -1}).status_code == 422
+    assert c.get('/v1/admin/changes', headers=admin(), params={'limit': 201}).status_code == 422
+    court = c.post('/v1/admin/courts', headers=admin(), json={
+        'name': 'Sân tập', 'price_hour': 100000}).json()
+    created = c.post('/v1/public/bookings', json=book(today())).json()
+    result = c.get('/v1/admin/changes', headers=admin()).json()
+    assert len(result['events']) == 2
+    assert result['events'][0]['resource'] == 'court'
+    assert result['events'][0]['record']['id'] == court['id']
+    assert result['events'][1]['resource'] == 'booking'
+    assert result['events'][1]['record']['id'] == created['id']
+    assert result['events'][1]['record']['status'] == 'PENDING'
+    assert 'public_token' not in str(result)
+    assert 'access_token' not in str(result)
+    assert result['events'][0]['seq'] < result['events'][1]['seq']
+    assert not result['has_more']
+    after = result['next_cursor']
+    assert c.get('/v1/admin/changes', headers=admin(), params={'after': after}).json()['events'] == []
+
+
+def test_change_feed_cursor_pages_and_staff_permissions(api):
+    c, application = api
+    assert _staff_bootstrap(c).status_code == 201
+    supervisor = _bearer(_staff_login(c).json())
+    c.post('/v1/admin/staff',headers=supervisor,json={
+        'username':'Operator01', 'password':'OperatorPass!2026', 'role':'STAFF'})
+    operator = _bearer(_staff_login(c,'operator01','OperatorPass!2026').json())
+    record = c.post('/v1/admin/courts', headers=supervisor, json={
+        'name':'Sân dành cho test','price_hour':100000}).json()
+    c.post('/v1/admin/bookings', headers=operator, json=book(today()))
+    c.patch(f"/v1/admin/courts/{record['id']}", headers=supervisor, json={'active':False})
+    collected=[]
+    cursor=0
+    while True:
+        page=c.get('/v1/admin/changes',headers=operator,
+                   params={'after':cursor, 'limit':1})
+        assert page.status_code == 200
+        data=page.json()
+        collected.extend(data['events'])
+        if not data['has_more']:
+            cursor=data['next_cursor']
+            break
+        assert data['next_cursor'] > cursor
+        cursor = data['next_cursor']
+    assert len(collected) == 3
+    assert [x['seq'] for x in collected] == sorted(x['seq'] for x in collected)
+    assert collected[-1]['resource'] == 'court'
+    assert collected[-1]['record']['active'] == 0
+    assert c.get('/v1/admin/changes',headers=operator,params={'after':cursor}).json()['events'] == []
+    # Revoked employees cannot use feed access to see personal customer data.
+    staff_id = c.get('/v1/admin/staff',headers=supervisor).json()[1]['id']
+    assert c.patch(f'/v1/admin/staff/{staff_id}',headers=supervisor,json={'active':False}).status_code==200
+    assert c.get('/v1/admin/changes',headers=operator).status_code == 401
+
+
+def test_change_feed_expired_hold_payment_and_cancel(api):
+    c, application=api
+    c.post('/v1/admin/courts',headers=admin(),json={'name':'Sân A','price_hour':100000})
+    booking=c.post('/v1/public/bookings',json=book(today())).json()
+    before=c.get('/v1/admin/changes',headers=admin()).json()['next_cursor']
+    with application.connection() as db:
+        db.execute("UPDATE bookings SET hold_until='2000-01-01T00:00:00+00:00' WHERE id=?",(booking['id'],))
+    after=c.get('/v1/admin/changes',headers=admin(),params={'after':before}).json()
+    assert len(after['events']) == 2  # hold field and expiration status changes
+    assert after['events'][-1]['record']['status'] == 'CANCELLED'
+    assert all(event['resource'] == 'booking' for event in after['events'])
+    assert c.get('/v1/admin/changes',headers=admin(),params={'after':after['next_cursor']}).json()['events'] == []
+
+
+def test_change_feed_backfill_existing_records_is_idempotent(api):
+    c, application=api
+    c.post('/v1/admin/courts', headers=admin(), json={'name':'Sân cũ','price_hour':100000})
+    c.post('/v1/admin/bookings',headers=admin(),json=book(today()))
+    # Simulate an upgraded database that previously had no change journal.
+    with application.connection() as db:
+        db.execute('DELETE FROM cloud_changes')
+    application.init_db()
+    first=c.get('/v1/admin/changes',headers=admin()).json()['events']
+    assert [event['resource'] for event in first] == ['court','booking']
+    application.init_db()
+    assert c.get('/v1/admin/changes',headers=admin()).json()['events'] == first
+
+
+def test_retry_key_is_idempotent_and_checks_payload(api):
+    c, application=api
+    c.post('/v1/admin/courts',headers=admin(),json={'name':'Sân A','price_hour':100000})
+    payload={**book(today()),'client_request_id':'stable-booking-request-0001'}
+    first=c.post('/v1/admin/bookings',headers=admin(),json=payload)
+    second=c.post('/v1/admin/bookings',headers=admin(),json=payload)
+    assert first.status_code == 201 and second.status_code == 201
+    assert first.json()['id'] == second.json()['id']
+    assert len(c.get('/v1/admin/bookings',headers=admin()).json()) == 1
+    with application.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM cloud_changes WHERE resource='booking'").fetchone()[0] == 1
+    mismatch=c.post('/v1/admin/bookings',headers=admin(),json={**payload,'customer_name':'Other Name'})
+    assert mismatch.status_code == 409
+    assert c.post('/v1/admin/bookings',headers=admin(),json={
+        **book(today(),'19:00','20:00'),'client_request_id':'invalid key spaces'}).status_code == 422
+    assert c.post('/v1/public/bookings',json=payload).status_code == 422
+
+
+def test_retry_key_concurrent_requests_produce_single_booking(api):
+    c, application=api
+    c.post('/v1/admin/courts',headers=admin(),json={'name':'Sân A','price_hour':100000})
+    payload={**book(today()),'client_request_id':'one-request-across-devices-123'}
+    barrier=threading.Barrier(4)
+    def retry(_):
+        barrier.wait()
+        result=c.post('/v1/admin/bookings',headers=admin(),json=payload)
+        return result.status_code, result.json().get('id')
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        responses=list(pool.map(retry,range(4)))
+    assert all(status==201 for status,_ in responses), responses
+    assert len({id for _,id in responses}) == 1
+    with application.connection() as db:
+        assert db.execute('SELECT count(*) FROM bookings').fetchone()[0] == 1
+
+
+def test_change_feed_delete_tombstones(api):
+    c, application=api
+    court=c.post('/v1/admin/courts',headers=admin(),json={'name':'Sân A','price_hour':100000}).json()
+    booking=c.post('/v1/admin/bookings',headers=admin(),json=book(today())).json()
+    checkpoint=c.get('/v1/admin/changes',headers=admin()).json()['next_cursor']
+    with application.connection() as db:
+        db.execute('DELETE FROM bookings WHERE id=?',(booking['id'],))
+        db.execute('DELETE FROM courts WHERE id=?',(court['id'],))
+    feed=c.get('/v1/admin/changes',headers=admin(),params={'after':checkpoint}).json()
+    assert [e['action'] for e in feed['events']]==['DELETE','DELETE']
+    assert all(e['record'] is None for e in feed['events'])
