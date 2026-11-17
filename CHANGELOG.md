@@ -1,3 +1,11 @@
+## 2.3.0 (nhánh upgrade/v2.3 — ổn định và demo)
+
+- Sửa GitHub Actions Android SDK setup và tên gói Android API 37.0 để build APK debug.
+- Bổ sung kiểm thử HTTP với Uvicorn thật, database tạm và dữ liệu giả.
+- Căn ngày mặc định website theo múi giờ Việt Nam (Asia/Ho_Chi_Minh).
+- README portfolio, ảnh demo, Render static blueprint, quy trình QA Android và hướng dẫn triển khai.
+- Giữ nguyên logic đặt sân, thanh toán và dữ liệu hiện có, không thay đổi hai nguồn lịch Android/cloud.
+
 ## 2.2.0-demo — GitHub-ready cloud improvements (17/11/2026)
 
 - Thêm API cập nhật sân cloud (đổi tên, giá/giờ, tạm đóng/mở). Tạm đóng chặn lịch mới, không tự hủy lịch cũ.
@@ -22,6 +30,14 @@
 - Kiểm thử độc lập SQLite v7: lần 1 thêm 52 bản ghi, lần 2 thêm 0, foreign_key_check không lỗi. XML 61/61 parse được; chưa build Android APK tại môi trường này.
 
 # Changelog
+
+## 2.3.0 (development branch)
+
+- CI Android: setup-android v4, SDK API 37.0, verify/upload APK debug.
+- Reproducible real HTTP smoke test with temporary SQLite (no real customer data).
+- Website date defaults to Asia/Ho_Chi_Minh; docs and portfolio README.
+- Render static demo Blueprint plus deployment and Android QA checklists.
+
 
 ## 2.0.0-alpha — 10/11/2026
 

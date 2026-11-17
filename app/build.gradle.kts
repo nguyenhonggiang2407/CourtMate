@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.courtmatepickleballcourtmanager"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "2.2.0-demo"
+        versionCode = 6
+        versionName = "2.3.0-demo"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

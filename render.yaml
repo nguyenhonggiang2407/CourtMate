@@ -1,0 +1,11 @@
+# Render Static Site: safe, isolated portfolio preview (no backend or real payments).
+# Create from https://dashboard.render.com/blueprints and choose your own workspace.
+services:
+  - type: web
+    name: courtmate-v23-preview
+    runtime: static
+    plan: free
+    branch: upgrade/v2.3
+    buildCommand: test -s demo/index.html
+    staticPublishPath: ./demo
+    autoDeploy: true

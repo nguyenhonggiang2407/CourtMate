@@ -12,7 +12,7 @@
     <div class="stack" style="margin-top:13px"><button type="button" class="btn secondary" id="checkStatus">Kiểm tra trạng thái</button>
     <button type="button" class="btn danger" id="cancelPending" hidden>Hủy yêu cầu đang chờ</button></div>
   </section></div></main><script>
-const $=id=>document.getElementById(id);const localToday=()=>{let d=new Date(),offset=d.getTimezoneOffset();return new Date(d.getTime()-offset*60000).toISOString().slice(0,10)};
+const $=id=>document.getElementById(id);const localToday=()=>{const pieces=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Ho_Chi_Minh',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());const parts=Object.fromEntries(pieces.filter(p=>p.type!=='literal').map(p=>[p.type,p.value]));return `${parts.year}-${parts.month}-${parts.day}`};
 $('day').min=localToday();$('day').value=localToday();
 async function json(url,options){let res=await fetch(url,options),obj=await res.json().catch(()=>({detail:'Không đọc được phản hồi'}));if(!res.ok)throw Error(typeof obj.detail==='string'?obj.detail:'Không thể thực hiện');return obj}
 async function load(){try{let courts=await json('/v1/public/courts');$('court').innerHTML='';for(let c of courts){let el=document.createElement('option');el.value=c.id;el.textContent=`${c.name} · ${c.price_hour.toLocaleString('vi-VN')} đ/giờ`;$('court').appendChild(el)}if(!courts.length)$('message').textContent='Chưa có sân nào trên hệ thống.';await busy()}catch(e){$('message').className='message error';$('message').textContent=e.message}}
