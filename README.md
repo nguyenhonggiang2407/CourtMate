@@ -46,13 +46,10 @@ Trình duyệt website ─── HTTPS ─────┤
 
 **Điểm cần phát triển tiếp:** xác thực nhân viên cloud theo tài khoản, backend làm nguồn lịch chính, chiến lược đồng bộ và chống xung đột, kiểm thử UI thực tế.
 
-### Tối ưu bản 2.3.1 (nhánh `optimize/v2.3.1`)
+### Tối ưu Cloud 2.3.1 (nhánh `optimize/v2.3.1`)
 
-- Chống xác nhận muộn khi giữ chỗ 20 phút đã hết hạn, giúp bảo toàn nguyên tắc không đặt trùng.
-- Danh sách cloud quản trị hỗ trợ phân trang `?limit=50&offset=0`, vẫn giữ mặc định 200 lịch cho màn hình Android cũ.
-- Tăng hiệu quả truy vấn theo ngày/hạn giữ chỗ với SQLite index, không tuyên bố số % tăng tốc khi chưa benchmark trên dữ liệu thực tế.
-- Giới hạn bộ nhớ limiter trong một process, trả `429` kèm `Retry-After` và thống nhất cửa sổ ngày của lịch trống.
-- Bộ kiểm thử backend tăng lên **21 bài**, cùng HTTP smoke test thật. Xem [báo cáo kỹ thuật và giới hạn](docs/OPTIMIZATION_2_3_1.md).
+Bản nâng cấp này sửa lỗi xác nhận giữ chỗ quá hạn; giới hạn bộ nhớ của rate limiter; thêm chỉ mục SQLite; hỗ trợ phân trang danh sách lịch quản trị và kiểm tra ngày xem lịch trống giống ngày tạo lịch. API mặc định giữ nguyên để tương thích ứng dụng Android 2.3. Bộ kiểm thử backend tăng từ **16 lên 21 bài**. Xem [báo cáo tối ưu và giới hạn](docs/OPTIMIZATION_2_3_1.md).
+
 
 
 ## Chạy Android

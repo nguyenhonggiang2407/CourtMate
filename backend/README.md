@@ -43,19 +43,21 @@ For a correctly signed PSP adapter POST `/v1/provider/webhooks/payment` with `X-
 
 **Chạy tests:** `python -m pip install -r requirements-dev.txt` rồi `python -m pytest tests -q` từ thư mục `backend`.
 
-## Thay đổi tương thích 2.3.1
+## Tối ưu và API tương thích 2.3.1
 
-- `GET /v1/admin/bookings` vẫn trả tối đa 200 lịch mặc định. Hỗ trợ `limit` (1–200) và `offset` (0–100.000) để phân trang; Android cũ không cần sửa.
-- `GET /v1/public/availability` chỉ nhận ngày từ hiện tại đến 365 ngày tới theo giờ Việt Nam, giống khi tạo lịch.
-- Admin không thể `CONFIRMED` một hold `PENDING` đã hết 20 phút; API trả HTTP `409` và ghi nhận `CANCELLED` trong DB.
-- Rate limiter hoạt động trong từng process và tối đa lưu 4.096 client gần đây; phải dùng WAF/Redis nếu chạy nhiều instance. Trả HTTP `429` với `Retry-After: 60`.
-- Chỉ mục DB được tạo khi `init_db()` chạy; tạo index có thể cần một khoảng khóa ngắn khi khởi động DB lớn. Khuyến nghị sao lưu trước khi triển khai/migrate.
+- `GET /v1/admin/bookings` hỗ trợ `limit=1..200`, `offset=0..100000`. Mặc định vẫn trả tối đa 200 lịch để tương thích Android đang dùng. Chỉ chọn cột cần thiết, không đọc `public_token`.
+- `GET /v1/public/availability`: ngày phải trong 0–365 ngày tới theo múi giờ Việt Nam.
+- Admin không thể xác nhận một yêu cầu giữ chỗ đã hết hạn: backend cập nhật `CANCELLED` và trả `409`.
+- Bộ giới hạn yêu cầu công khai 30 yêu cầu/phút/IP dùng tối đa 4.096 IP gần đây trong mỗi process, trả `Retry-After: 60` khi `429`. **Không thay thế WAF hoặc Redis** khi chạy nhiều process.
+- `init_db()` tạo thêm chỉ mục truy vấn theo ngày và lịch PENDING hết hạn. Hãy sao lưu DB và tính thời gian khóa tạo index khi migrate một DB lớn.
+
+Xem [báo cáo tối ưu 2.3.1](../docs/OPTIMIZATION_2_3_1.md).
 
 ## Explicit limitations
 
 - Local Android SQLite and cloud data are **not synchronized**. No multi-branch conflict resolution, offline queue or automatic local booking mirroring.
 - Admin uses one server API key shared with admin devices and held only in Android process memory. This is a starter integration, not production RBAC. In production add per-staff tokens, revocation and key rotation.
-- Public endpoints have a best-effort per-process rate limiter for booking, lookup and cancellation, but still no CAPTCHA, SMS confirmation, shared multi-worker limiter, fraud controls, deposits or cancellation notifications. These must be hardened before a public launch.
+- Public endpoints have only a best-effort in-process limiter for booking, lookup and cancellation; there is no CAPTCHA, SMS verification, distributed rate limit, fraud control, deposits or cancellation notifications. Must be hardened before public use.
 - No actual bank connection. To enable a real payment flow, obtain partner contract, implement actual provider verification and run an end-to-end sandbox test.
 - App `SQLite` backup contains local user hashes; exported backup is not encrypted. Store backup files securely.
 
