@@ -14,7 +14,12 @@ import java.nio.charset.StandardCharsets;
 public final class CloudBookingRepository {
     private final String baseUrl;
     private final String bearer;
+    private final String role;
+    private final boolean legacy;
     public CloudBookingRepository(String url, String token) {
+        this(url, token, "ADMIN", true);
+    }
+    private CloudBookingRepository(String url, String token, String role, boolean legacy) {
         String normalized = url == null ? "" : url.trim().replaceAll("/+$", "");
         try {
             URI parsed = URI.create(normalized);
@@ -31,7 +36,58 @@ public final class CloudBookingRepository {
         }
         this.baseUrl = normalized;
         this.bearer = token.trim();
+        this.role = role;
+        this.legacy = legacy;
     }
+
+    /** Credentials are used for a single HTTPS request; only the short-lived bearer is retained. */
+    public static CloudBookingRepository login(String server, String username, String password) throws Exception {
+        String base = server == null ? "" : server.trim().replaceAll("/+$", "");
+        URI uri;
+        try { uri = URI.create(base); }
+        catch (RuntimeException e) { throw new IllegalArgumentException("Máy chủ HTTPS không hợp lệ", e); }
+        if (!"https".equals(uri.getScheme()) || uri.getHost() == null
+                || uri.getRawUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null)
+            throw new IllegalArgumentException("Máy chủ phải sử dụng HTTPS");
+        HttpURLConnection conn = (HttpURLConnection) new URL(base + "/v1/auth/login").openConnection();
+        try {
+            conn.setInstanceFollowRedirects(false);
+            conn.setConnectTimeout(10_000);
+            conn.setReadTimeout(15_000);
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            conn.setRequestProperty("Accept", "application/json");
+            JSONObject request = new JSONObject().put("username", username).put("password", password);
+            try (OutputStream out = conn.getOutputStream()) {
+                out.write(request.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            int code = conn.getResponseCode();
+            try (InputStream in = code >= 400 ? conn.getErrorStream() : conn.getInputStream()) {
+                if (in == null) throw new IllegalStateException("Máy chủ không trả dữ liệu đăng nhập");
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                byte[] chunk = new byte[4096];
+                int n;
+                while ((n = in.read(chunk)) != -1) {
+                    if (buffer.size() + n > 16_384) throw new IllegalStateException("Phản hồi đăng nhập quá lớn");
+                    buffer.write(chunk, 0, n);
+                }
+                JSONObject data = new JSONObject(buffer.toString("UTF-8"));
+                if (code < 200 || code >= 300)
+                    throw new IllegalStateException("Đăng nhập cloud thất bại (HTTP " + code + "): "
+                            + data.optString("detail", "Kiểm tra tài khoản và mật khẩu"));
+                String role = data.getString("role");
+                if (!"ADMIN".equals(role) && !"STAFF".equals(role))
+                    throw new IllegalStateException("Vai trò cloud không hợp lệ");
+                return new CloudBookingRepository(base, data.getString("access_token"), role, false);
+            }
+        } finally { conn.disconnect(); }
+    }
+
+    public boolean isAdmin() { return "ADMIN".equals(role); }
+    public String role() { return role; }
+    public void logout() throws Exception { if (!legacy) request("POST", "/v1/auth/logout", null); }
+
     private String request(String method, String path, JSONObject body) throws Exception {
         URL url = new URL(baseUrl + path);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -82,8 +138,15 @@ public final class CloudBookingRepository {
         return new JSONObject(request("POST", "/v1/admin/courts",
                 new JSONObject().put("name", name).put("price_hour", priceHour)));
     }
-    public JSONObject summary() throws Exception {
-        return new JSONObject(request("GET", "/v1/admin/summary", null));
+    public JSONObject summary() throws Exception { return summary(null); }
+    public JSONObject summary(String day) throws Exception {
+        return new JSONObject(request("GET", "/v1/admin/summary"
+                + (day == null ? "" : "?date=" + validatedDay(day)), null));
+    }
+    private static String validatedDay(String date) {
+        if (!date.matches("\\d{4}-\\d{2}-\\d{2}"))
+            throw new IllegalArgumentException("Ngày phải là YYYY-MM-DD");
+        return date;
     }
     public JSONObject updateCourtActive(int id, boolean active) throws Exception {
         return new JSONObject(request("POST", "/v1/admin/courts/" + id + "/update",
@@ -91,6 +154,10 @@ public final class CloudBookingRepository {
     }
     public JSONArray bookings() throws Exception {
         return new JSONArray(request("GET", "/v1/admin/bookings", null));
+    }
+    public JSONArray bookingsForDate(String day) throws Exception {
+        return new JSONArray(request("GET", "/v1/admin/bookings?date=" + validatedDay(day)
+                + "&limit=200&offset=0", null));
     }
     public JSONObject create(JSONObject values) throws Exception {
         return new JSONObject(request("POST", "/v1/admin/bookings", values));

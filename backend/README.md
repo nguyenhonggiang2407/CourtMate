@@ -70,3 +70,57 @@ docker compose up --build -d
 ```
 
 Port bind `127.0.0.1:8000` only; use HTTPS proxy with real certificate and configure domain before Android can connect. Persist DB in named volume `courtmate_data`, back up this volume periodically. Before exposing the public portal, enforce CAPTCHA/verification, per-user staff auth, firewall and production-grade monitoring.
+
+## Cloud staff accounts (CourtMate 2.4 demo)
+
+**Transition from the old shared key:** legacy admin Bearer remains available while
+`COURTMATE_ALLOW_LEGACY_ADMIN=true` (default for compatibility). **Disable it after provisioning named accounts.**
+Keep `COURTMATE_ADMIN_TOKEN` secret and rotate any previously shared value.
+Use HTTPS for all remote requests; login is not suitable for plaintext HTTP.
+
+Bootstrap the first Admin **once** with the legacy key:
+
+```bash
+curl -X POST https://your-courtmate-host/v1/auth/bootstrap \
+  -H 'Authorization: Bearer YOUR_EXISTING_ADMIN_TOKEN' \
+  -H 'Content-Type: application/json' \
+  --data '{"username":"owner01","password":"USE_YOUR_OWN_12_PLUS_CHAR_PASSWORD"}'
+```
+
+Avoid entering real passwords on shared terminals or in shell history. When you
+have server-shell access, prefer `python manage_staff.py create-admin` (uses
+`getpass`, does not echo the password). Remove sensitive commands from shell
+history and use a secrets manager.
+
+Authenticate with `POST /v1/auth/login` and send the returned `access_token`
+with `Authorization: Bearer ...`. Responses include the account role and
+`expires_at` (12 hours). `POST /v1/auth/logout` revokes the current token;
+`GET /v1/auth/me` returns the current role. Sessions store SHA-256 token hashes,
+not raw bearer tokens. Passwords use PBKDF2-HMAC-SHA256 with distinct salts.
+
+Admin-only routes:
+- `POST /v1/admin/courts`, `PATCH /v1/admin/courts/{id}` and Android POST alias
+- `GET /v1/admin/staff`, `POST /v1/admin/staff`, `PATCH /v1/admin/staff/{id}` (active true/false)
+- `POST /v1/admin/bookings/{id}/bank-intent`
+
+Staff-or-Admin routes: list courts, view summary and bookings, create a cloud booking,
+confirm/cancel eligible bookings. This is **server-enforced RBAC**, not only
+button visibility. Disabling an account immediately deletes its live sessions.
+The last active Admin cannot be disabled.
+
+Use this workflow after the first Admin is created:
+
+1. Log in as the new Admin and create individual Staff accounts with `/v1/admin/staff`.
+2. Switch Android Cloud UI from legacy token input to username + password.
+3. Set `COURTMATE_ALLOW_LEGACY_ADMIN=false` and restart the server.
+4. Verify the shared key returns HTTP 401 and named Admin/Staff sessions work.
+
+Login rate limiting is **per-process best effort**: 10 requests / 5 min / IP+username,
+max 4,096 buckets. Production use requires Redis/WAF/shared throttling, audit logs,
+credential rotation, monitoring and backup validation. No default account or
+password is embedded in the project.
+
+**Current cloud scope:** Android Cloud screen shows one date's remote bookings
+(up to 200 results) across devices. It does **not** push local SQLite reservations
+to the server, merge conflicts, or synchronize local invoices/payments. Avoid
+using offline and cloud schedules in parallel for the same physical court.

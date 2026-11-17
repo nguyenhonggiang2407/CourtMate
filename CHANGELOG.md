@@ -1,3 +1,11 @@
+## 2.4.0-demo — Cloud staff accounts và Android remote schedule
+
+- Backend: tạo Admin một lần, tạo/vô hiệu hóa tài khoản STAFF/ADMIN, login/logout, token phiên 12 giờ, RBAC theo endpoint.
+- Mật khẩu PBKDF2, salt riêng; token chỉ lưu dạng hash phía server; giới hạn đăng nhập theo IP+tài khoản trong mỗi process.
+- Android: đăng nhập HTTPS bằng tài khoản, thoát phiên, ẩn thao tác quản trị với Staff, lọc lịch/summary cloud theo ngày.
+- Có chế độ chuyển tiếp token quản trị legacy, cần chủ động tắt khi đã chuyển qua tài khoản nhân viên.
+- Chưa merge lịch offline và cloud; không bảo đảm tính nhất quán nếu vận hành hai nguồn đồng thời.
+
 ## 2.3.1 — Tối ưu cloud (nhánh optimize/v2.3.1)
 
 - Chặn Admin xác nhận giữ chỗ PENDING đã hết hạn, đồng thời trả slot cho yêu cầu mới.

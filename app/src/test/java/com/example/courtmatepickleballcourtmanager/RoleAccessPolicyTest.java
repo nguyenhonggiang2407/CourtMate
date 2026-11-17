@@ -17,8 +17,8 @@ public class RoleAccessPolicyTest {
     @Test public void staffCannotManageUsers() {
         assertFalse(RoleAccessPolicy.canOpen("STAFF", "UsersActivity"));
     }
-    @Test public void staffCannotUseCloudAdminToken() {
-        assertFalse(RoleAccessPolicy.canOpen("STAFF", "CloudBookingsActivity"));
+    @Test public void staffCanSignInToCloudWithOwnCredentials() {
+        assertTrue(RoleAccessPolicy.canOpen("STAFF", "CloudBookingsActivity"));
     }
     @Test public void missingRoleDenied() {
         assertFalse(RoleAccessPolicy.canOpen(null, "DashboardActivity"));

@@ -1,3 +1,5 @@
+> **CourtMate 2.4.0 demo (branch feature/v2.4-cloud-staff):** đã bổ sung đăng nhập cloud từng nhân viên, phân quyền trên API, quản lý/thu hồi phiên, lọc lịch cloud theo ngày từ Android. CI Android và kiểm thử backend được chạy ở nhánh riêng trước khi merge. **Lịch SQLite offline chưa đồng bộ hai chiều với lịch cloud.** Xem [ghi chú bản 2.4](docs/RELEASE_2_4.md) và [tài liệu Cloud API](backend/README.md).
+
 # CourtMate — Quản lý sân Pickleball
 
 **Android (Java/XML/SQLite) · Python/FastAPI · Demo website · v2.3 (nhánh phát triển)**

@@ -34,20 +34,27 @@ WEBHOOK_SECRET = lambda: os.getenv("COURTMATE_GATEWAY_WEBHOOK_SECRET", "")
 PAYMENT_TEMPLATE = lambda: os.getenv("COURTMATE_PAYMENT_URL_TEMPLATE", "")
 PORTAL_ENABLED = lambda: os.getenv("COURTMATE_PUBLIC_BOOKING", "false").lower() == "true"
 WEBHOOK_WINDOW_S = 300
+SESSION_LIFETIME_HOURS = 12
+PASSWORD_ROUNDS = 260_000
+LEGACY_ADMIN_ALLOWED = lambda: os.getenv("COURTMATE_ALLOW_LEGACY_ADMIN", "true").lower() == "true"
 VIETNAM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
     yield
 
-app = FastAPI(title="CourtMate Cloud pilot", version="0.3.1", lifespan=lifespan)
+app = FastAPI(title="CourtMate Cloud pilot", version="0.4.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
-# Bounded per-process demo limiter; production needs shared Redis/WAF.
+# A bounded, per-process best-effort limiter for the demo. A shared Redis/WAF
+# limiter is needed for multiple workers or a production deployment.
 _public_attempts: OrderedDict[str, deque[float]] = OrderedDict()
 _public_lock = threading.Lock()
 PUBLIC_LIMIT_WINDOW_S = 60
 PUBLIC_LIMIT_REQUESTS = 30
 PUBLIC_LIMIT_MAX_CLIENTS = 4096
+_login_attempts: OrderedDict[str, deque[float]] = OrderedDict()
+_login_lock = threading.Lock()
+
 
 
 @app.middleware("http")
@@ -65,6 +72,8 @@ def limit_public_bookings(request: Request):
     ip = request.client.host if request.client else "unknown"
     now = time.monotonic()
     with _public_lock:
+        # Most recently accessed clients stay at the end. Drop idle clients
+        # without scanning the full mapping for every request.
         while _public_attempts:
             oldest_ip, oldest_history = next(iter(_public_attempts.items()))
             if oldest_history and now - oldest_history[-1] < PUBLIC_LIMIT_WINDOW_S:
@@ -126,6 +135,22 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_bookings_day ON bookings(date,start,id);
         CREATE INDEX IF NOT EXISTS idx_bookings_expirable ON bookings(hold_until)
             WHERE status='PENDING' AND payment_status!='PAID';
+        CREATE TABLE IF NOT EXISTS staff_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_salt TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('ADMIN','STAFF')),
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS staff_sessions (
+            token_hash TEXT PRIMARY KEY,
+            staff_id INTEGER NOT NULL REFERENCES staff_users(id),
+            issued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT);
+        CREATE INDEX IF NOT EXISTS idx_staff_sessions_expires ON staff_sessions(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_staff_sessions_account ON staff_sessions(staff_id);
         CREATE TABLE IF NOT EXISTS payment_events (
             event_id TEXT PRIMARY KEY, booking_id INTEGER NOT NULL REFERENCES bookings(id),
             provider_reference TEXT NOT NULL, amount INTEGER NOT NULL,
@@ -133,14 +158,192 @@ def init_db():
         ''')
 
 
-def require_admin(authorization: str | None = Header(default=None)):
-    secret = ADMIN_TOKEN()
-    if len(secret) < 32:
-        raise HTTPException(status_code=503, detail="Cần cấu hình COURTMATE_ADMIN_TOKEN tối thiểu 32 ký tự")
-    supplied = (authorization or "").removeprefix("Bearer ")
-    if not hmac.compare_digest(supplied, secret):
-        raise HTTPException(status_code=401, detail="Token quản trị không hợp lệ")
-    return True
+def _auth_header(authorization: str | None) -> str:
+    value = authorization or ""
+    if not value.startswith("Bearer "):
+        raise HTTPException(401, "Thiếu Bearer token")
+    value = value[7:]
+    if not 32 <= len(value) <= 256:
+        raise HTTPException(401, "Token không hợp lệ")
+    return value
+
+
+def require_actor(authorization: str | None = Header(default=None)) -> dict:
+    """Server-side role check; legacy admin key may be disabled after migration."""
+    supplied = _auth_header(authorization)
+    legacy = ADMIN_TOKEN()
+    if LEGACY_ADMIN_ALLOWED() and len(legacy) >= 32 and hmac.compare_digest(supplied, legacy):
+        return {"role": "ADMIN", "username": "legacy-admin", "legacy": True}
+    hashed = hashlib.sha256(supplied.encode("utf-8")).hexdigest()
+    with connection() as db:
+        row = db.execute("""SELECT u.id,u.username,u.role FROM staff_sessions s
+            JOIN staff_users u ON s.staff_id=u.id
+            WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>?
+              AND u.active=1""", (hashed, iso_now())).fetchone()
+        if row:
+            return {"role": row["role"], "username": row["username"],
+                    "id": row["id"], "session_hash": hashed, "legacy": False}
+    raise HTTPException(401, "Phiên đăng nhập không hợp lệ hoặc đã hết hạn")
+
+
+def require_admin(authorization: str | None = Header(default=None)) -> dict:
+    actor = require_actor(authorization)
+    if actor["role"] != "ADMIN":
+        raise HTTPException(403, "Chức năng chỉ dành cho quản trị viên")
+    return actor
+
+
+def require_staff(authorization: str | None = Header(default=None)) -> dict:
+    return require_actor(authorization)
+
+
+def _hash_password(password: str, salt: bytes) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt,
+                               PASSWORD_ROUNDS).hex()
+
+
+def _limit_login(request: Request, username: str):
+    # Pilot per-process defense; deployment requires a shared rate limiter/WAF.
+    host = request.client.host if request.client else "unknown"
+    key = f"{host}:{username.lower()}"
+    now = time.monotonic()
+    with _login_lock:
+        while _login_attempts:
+            _, oldest = next(iter(_login_attempts.items()))
+            if oldest and now-oldest[-1] < 300:
+                break
+            _login_attempts.popitem(last=False)
+        history = _login_attempts.get(key)
+        if history is None:
+            if len(_login_attempts) >= 4096:
+                _login_attempts.popitem(last=False)
+            history = deque()
+            _login_attempts[key] = history
+        else:
+            _login_attempts.move_to_end(key)
+        while history and now-history[0] >= 300:
+            history.popleft()
+        if len(history) >= 10:
+            raise HTTPException(429, "Thử đăng nhập quá nhiều lần", headers={"Retry-After":"300"})
+        history.append(now)
+
+
+class StaffCredentials(BaseModel):
+    username: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_.-]{2,31}$")
+    password: str = Field(min_length=12, max_length=128)
+
+
+class StaffCreate(StaffCredentials):
+    role: Literal["ADMIN", "STAFF"] = "STAFF"
+
+
+def _create_staff(db, payload: StaffCreate):
+    normalized = payload.username.lower()
+    salt = secrets.token_bytes(16)
+    now = iso_now()
+    try:
+        cur = db.execute("""INSERT INTO staff_users
+            (username,password_salt,password_hash,role,created_at)
+            VALUES(?,?,?,?,?)""",
+            (normalized, salt.hex(), _hash_password(payload.password,salt), payload.role, now))
+    except sqlite3.IntegrityError as ex:
+        raise HTTPException(409,"Tên tài khoản đã tồn tại") from ex
+    return {"id":cur.lastrowid,"username":normalized,"role":payload.role,"active":True}
+
+
+@app.post("/v1/auth/bootstrap",status_code=201)
+def bootstrap(payload: StaffCredentials, authorization: str | None = Header(default=None)):
+    """One-time bootstrap using the existing server key, never a shipped password."""
+    if not LEGACY_ADMIN_ALLOWED() or len(ADMIN_TOKEN()) < 32 or not hmac.compare_digest(
+            _auth_header(authorization), ADMIN_TOKEN()):
+        raise HTTPException(401,"Cần token quản trị hợp lệ để khởi tạo")
+    with connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if db.execute("SELECT 1 FROM staff_users LIMIT 1").fetchone():
+                raise HTTPException(409,"Hệ thống đã có tài khoản quản trị")
+            result = _create_staff(db,StaffCreate(username=payload.username,
+                                                  password=payload.password, role="ADMIN"))
+            db.execute("COMMIT")
+            return result
+        except Exception:
+            if db.in_transaction: db.execute("ROLLBACK")
+            raise
+
+
+@app.post("/v1/auth/login")
+def login(payload: StaffCredentials, request: Request):
+    username = payload.username.lower()
+    _limit_login(request,username)
+    with connection() as db:
+        row = db.execute("SELECT * FROM staff_users WHERE username=? AND active=1",(username,)).fetchone()
+        salt = bytes.fromhex(row["password_salt"]) if row else b"\x00"*16
+        candidate = _hash_password(payload.password,salt)
+        if row is None or not hmac.compare_digest(candidate,row["password_hash"]):
+            raise HTTPException(401,"Sai tài khoản hoặc mật khẩu")
+        now = datetime.now(timezone.utc)
+        expires_at = (now+timedelta(hours=SESSION_LIFETIME_HOURS)).isoformat(timespec="seconds")
+        token = secrets.token_urlsafe(48)
+        db.execute("DELETE FROM staff_sessions WHERE expires_at<?",(iso_now(),))
+        db.execute("INSERT INTO staff_sessions(token_hash,staff_id,issued_at,expires_at) VALUES(?,?,?,?)",
+                   (hashlib.sha256(token.encode()).hexdigest(),row["id"],iso_now(),expires_at))
+        return {"access_token":token,"token_type":"bearer","expires_at":expires_at,
+                "role":row["role"],"username":row["username"]}
+
+
+@app.get("/v1/auth/me")
+def who_am_i(actor: dict = Depends(require_staff)):
+    return {"role":actor["role"],"username":actor["username"],"legacy":actor["legacy"]}
+
+
+@app.post("/v1/auth/logout")
+def logout(actor: dict = Depends(require_staff)):
+    if actor["legacy"]:
+        raise HTTPException(409,"Không thể thu hồi token legacy; tắt bằng biến môi trường")
+    with connection() as db:
+        db.execute("UPDATE staff_sessions SET revoked_at=? WHERE token_hash=?",
+                   (iso_now(),actor["session_hash"]))
+    return {"revoked":True}
+
+
+@app.get("/v1/admin/staff",dependencies=[Depends(require_admin)])
+def list_staff():
+    with connection() as db:
+        return [dict(r) for r in db.execute(
+            "SELECT id,username,role,active,created_at FROM staff_users ORDER BY id")]
+
+
+@app.post("/v1/admin/staff",status_code=201,dependencies=[Depends(require_admin)])
+def add_staff(payload: StaffCreate):
+    with connection() as db:
+        return _create_staff(db,payload)
+
+
+class StaffActive(BaseModel):
+    active: bool
+
+
+@app.patch("/v1/admin/staff/{staff_id}", dependencies=[Depends(require_admin)])
+def change_staff(staff_id: int, payload: StaffActive):
+    with connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            row = db.execute("SELECT id,username,role,active FROM staff_users WHERE id=?",
+                             (staff_id,)).fetchone()
+            if row is None:
+                raise HTTPException(404,"Không tìm thấy tài khoản")
+            if row["role"] == "ADMIN" and row["active"] and not payload.active:
+                count=db.execute("SELECT count(*) FROM staff_users WHERE role='ADMIN' AND active=1").fetchone()[0]
+                if count <= 1:
+                    raise HTTPException(409,"Không được vô hiệu hóa quản trị viên cuối cùng")
+            db.execute("UPDATE staff_users SET active=? WHERE id=?",(int(payload.active),staff_id))
+            if not payload.active:
+                db.execute("DELETE FROM staff_sessions WHERE staff_id=?",(staff_id,))
+            db.execute("COMMIT")
+            return {"id":staff_id,"username":row["username"],"role":row["role"],"active":payload.active}
+        except Exception:
+            if db.in_transaction: db.execute("ROLLBACK")
+            raise
 
 
 def iso_now() -> str:
@@ -353,7 +556,7 @@ def public_cancel_booking(query: BookingLookup, request: Request):
             raise
 
 
-@app.get("/v1/admin/courts", dependencies=[Depends(require_admin)])
+@app.get("/v1/admin/courts", dependencies=[Depends(require_staff)])
 def admin_courts():
     with connection() as db:
         return [dict(r) for r in db.execute("SELECT * FROM courts ORDER BY id")]
@@ -414,7 +617,7 @@ def admin_update_court_post(court_id: int, payload: CourtUpdate):
     return admin_update_court(court_id, payload)
 
 
-@app.get("/v1/admin/summary", dependencies=[Depends(require_admin)])
+@app.get("/v1/admin/summary", dependencies=[Depends(require_staff)])
 def admin_summary(date: str | None = None):
     """Daily operational totals for the canonical *cloud* bookings only."""
     selected = date or datetime.now(VIETNAM_TZ).date().isoformat()
@@ -444,7 +647,7 @@ def admin_summary(date: str | None = None):
             raise
 
 
-@app.get("/v1/admin/bookings", dependencies=[Depends(require_admin)])
+@app.get("/v1/admin/bookings", dependencies=[Depends(require_staff)])
 def admin_bookings(date: str | None = None,
                    limit: int = Query(default=200, ge=1, le=200),
                    offset: int = Query(default=0, ge=0, le=100_000)):
@@ -452,6 +655,8 @@ def admin_bookings(date: str | None = None,
         db.execute("BEGIN IMMEDIATE")
         try:
             expire_holds(db)
+            # Project only the fields used by Android; do not load the private
+            # access token from SQLite only to delete it afterwards.
             sql = ("SELECT b.id,b.court_id,b.date,b.start,b.end,b.customer_name,"
                    "b.customer_phone,b.amount,b.status,b.payment_status,"
                    "b.payment_reference,b.payment_url,b.paid_at,b.created_at,"
@@ -469,7 +674,7 @@ def admin_bookings(date: str | None = None,
             sql += " ORDER BY b.date DESC, b.start ASC, b.id DESC LIMIT ? OFFSET ?"
             params.extend((limit, offset))
             rows = [dict(r) for r in db.execute(sql, params)]
-            # Public access tokens are never selected from SQLite.
+            # Sensitive public_token is never selected, even in server memory.
             db.execute("COMMIT")
             return rows
         except Exception:
@@ -477,7 +682,7 @@ def admin_bookings(date: str | None = None,
             raise
 
 
-@app.post("/v1/admin/bookings", status_code=201, dependencies=[Depends(require_admin)])
+@app.post("/v1/admin/bookings", status_code=201, dependencies=[Depends(require_staff)])
 def admin_book(payload: BookingCreate):
     result = create_booking(payload, False)
     result.pop("public_token", None)
@@ -488,11 +693,13 @@ class BookingStatus(BaseModel):
     status: Literal["CONFIRMED", "CANCELLED"]
 
 
-@app.patch("/v1/admin/bookings/{booking_id}", dependencies=[Depends(require_admin)])
+@app.patch("/v1/admin/bookings/{booking_id}", dependencies=[Depends(require_staff)])
 def update_booking(booking_id: int, payload: BookingStatus):
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            # Resolve expired pending holds before checking admin transitions;
+            # otherwise an expired hold could be confirmed after its deadline.
             expire_holds(db)
             row = db.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
             if not row:
@@ -500,6 +707,7 @@ def update_booking(booking_id: int, payload: BookingStatus):
             if row["payment_status"] in ("PAID", "BANK_PENDING") and payload.status == "CANCELLED":
                 raise HTTPException(409, "Lịch đang/đã thanh toán; cần hoàn tiền hoặc đối soát riêng")
             if row["status"] == "CANCELLED" and payload.status == "CONFIRMED":
+                # Persist the expiration even when refusing the transition.
                 db.execute("COMMIT")
                 raise HTTPException(409, "Không mở lại lịch đã hủy")
             db.execute("UPDATE bookings SET status=?, updated_at=? WHERE id=?",
@@ -512,7 +720,7 @@ def update_booking(booking_id: int, payload: BookingStatus):
             raise
 
 
-@app.post("/v1/admin/bookings/{booking_id}/status", dependencies=[Depends(require_admin)])
+@app.post("/v1/admin/bookings/{booking_id}/status", dependencies=[Depends(require_staff)])
 def update_booking_post(booking_id: int, payload: BookingStatus):
     return update_booking(booking_id, payload)
 

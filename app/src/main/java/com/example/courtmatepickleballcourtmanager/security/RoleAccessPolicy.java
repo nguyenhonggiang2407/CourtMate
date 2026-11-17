@@ -11,7 +11,7 @@ public final class RoleAccessPolicy {
             "CustomerActivity", "CalendarViewActivity", "CourtTimelineActivity",
             "CourtSessionActivity", "SessionDetailActivity", "PaymentActivity",
             "InvoiceActivity", "RentalActivity", "ExtendedManagementActivity",
-            "AboutActivity", "ChangePasswordActivity"));
+            "AboutActivity", "ChangePasswordActivity", "CloudBookingsActivity"));
     private RoleAccessPolicy() { }
     public static boolean canOpen(String role, String activitySimpleName) {
         if (role == null || activitySimpleName == null) return false;

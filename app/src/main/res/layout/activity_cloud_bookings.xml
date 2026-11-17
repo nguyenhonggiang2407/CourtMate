@@ -17,7 +17,7 @@
                 android:textStyle="bold" />
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:layout_marginTop="6dp" android:textSize="13sp"
-                android:text="Máy chủ chung nhiều thiết bị. Lịch online CHƯA đồng bộ hai chiều với lịch SQLite offline. Chỉ chủ sân được dùng token quản trị máy chủ." />
+                android:text="Lịch cloud dùng chung nhiều thiết bị, chưa đồng bộ hai chiều với SQLite offline. Đăng nhập theo tài khoản được cấp; token legacy chỉ dùng trong giai đoạn chuyển tiếp." />
             <com.google.android.material.textfield.TextInputLayout
                 android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:layout_marginTop="16dp" android:hint="Địa chỉ HTTPS của máy chủ">
@@ -27,7 +27,22 @@
             </com.google.android.material.textfield.TextInputLayout>
             <com.google.android.material.textfield.TextInputLayout
                 android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" android:hint="Token quản trị cloud"
+                android:layout_marginTop="8dp" android:hint="Tên tài khoản cloud">
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/cloudUsername" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:inputType="text" />
+            </com.google.android.material.textfield.TextInputLayout>
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:hint="Mật khẩu cloud"
+                app:endIconMode="password_toggle">
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/cloudPassword" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:inputType="textPassword" />
+            </com.google.android.material.textfield.TextInputLayout>
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:hint="Token quản trị legacy (nếu chưa tạo tài khoản)"
                 app:endIconMode="password_toggle">
                 <com.google.android.material.textfield.TextInputEditText
                     android:id="@+id/cloudToken" android:layout_width="match_parent"
@@ -35,7 +50,11 @@
             </com.google.android.material.textfield.TextInputLayout>
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/cloudConnect" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:text="Kết nối máy chủ" />
+                android:layout_height="wrap_content" android:text="Đăng nhập / Kết nối máy chủ" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/cloudDisconnect" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:text="Đăng xuất cloud"
+                style="@style/Widget.Material3.Button.OutlinedButton" />
             <TextView android:id="@+id/cloudStatus"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:layout_marginTop="8dp" android:textSize="13sp"
@@ -49,6 +68,13 @@
                 android:id="@+id/cloudAddBooking" android:layout_width="match_parent"
                 android:layout_height="wrap_content" android:layout_marginTop="18dp"
                 android:text="+ Tạo lịch online" />
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:hint="Ngày lịch cloud (YYYY-MM-DD)">
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/cloudDateFilter" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:inputType="date" />
+            </com.google.android.material.textfield.TextInputLayout>
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/cloudRefresh" style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
