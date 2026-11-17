@@ -1,4 +1,4 @@
-# CourtMate Cloud – pilot API (0.3.0 / CourtMate 2.2.0-demo)
+# CourtMate Cloud – pilot API (0.3.1 / CourtMate 2.3.1-demo)
 
 FastAPI backend for a **centralized ONLINE booking schedule** shared by multiple Android clients and customers. This is a **separate cloud schedule**, not a replica of the local Android SQLite DB. Do **not** regard local bookings and cloud bookings as mutually exclusive while deploying it: migrate or use one canonical booking source before going live.
 
@@ -43,11 +43,21 @@ For a correctly signed PSP adapter POST `/v1/provider/webhooks/payment` with `X-
 
 **Chạy tests:** `python -m pip install -r requirements-dev.txt` rồi `python -m pytest tests -q` từ thư mục `backend`.
 
+## Tối ưu và API tương thích 2.3.1
+
+- `GET /v1/admin/bookings` hỗ trợ `limit=1..200`, `offset=0..100000`. Mặc định vẫn trả tối đa 200 lịch để tương thích Android đang dùng. Chỉ chọn cột cần thiết, không đọc `public_token`.
+- `GET /v1/public/availability`: ngày phải trong 0–365 ngày tới theo múi giờ Việt Nam.
+- Admin không thể xác nhận một yêu cầu giữ chỗ đã hết hạn: backend cập nhật `CANCELLED` và trả `409`.
+- Bộ giới hạn yêu cầu công khai 30 yêu cầu/phút/IP dùng tối đa 4.096 IP gần đây trong mỗi process, trả `Retry-After: 60` khi `429`. **Không thay thế WAF hoặc Redis** khi chạy nhiều process.
+- `init_db()` tạo thêm chỉ mục truy vấn theo ngày và lịch PENDING hết hạn. Hãy sao lưu DB và tính thời gian khóa tạo index khi migrate một DB lớn.
+
+Xem [báo cáo tối ưu 2.3.1](../docs/OPTIMIZATION_2_3_1.md).
+
 ## Explicit limitations
 
 - Local Android SQLite and cloud data are **not synchronized**. No multi-branch conflict resolution, offline queue or automatic local booking mirroring.
 - Admin uses one server API key shared with admin devices and held only in Android process memory. This is a starter integration, not production RBAC. In production add per-staff tokens, revocation and key rotation.
-- The public endpoint has no CAPTCHA, SMS confirmation, fraud/rate-limit protection, deposits or cancellation notifications. Must be hardened before a public launch.
+- Public endpoints have only a best-effort in-process limiter for booking, lookup and cancellation; there is no CAPTCHA, SMS verification, distributed rate limit, fraud control, deposits or cancellation notifications. Must be hardened before public use.
 - No actual bank connection. To enable a real payment flow, obtain partner contract, implement actual provider verification and run an end-to-end sandbox test.
 - App `SQLite` backup contains local user hashes; exported backup is not encrypted. Store backup files securely.
 
