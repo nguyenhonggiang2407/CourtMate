@@ -1,3 +1,12 @@
+## 2.3.1 — Tối ưu cloud (nhánh optimize/v2.3.1)
+
+- Chặn Admin xác nhận giữ chỗ PENDING đã hết hạn, đồng thời trả slot cho yêu cầu mới.
+- Giới hạn bộ nhớ rate limiter theo process, dọn IP không hoạt động và trả Retry-After khi HTTP 429.
+- Thêm SQLite index cho truy vấn theo ngày và lịch giữ chỗ sắp hết hạn.
+- API admin bookings hỗ trợ phân trang, tránh đọc public_token từ DB; availability kiểm tra khoảng ngày hợp lệ.
+- Tăng từ 16 lên 21 bài kiểm thử FastAPI, giữ tương thích phần Android và HTTP smoke test.
+- Chưa đồng bộ lịch SQLite Android/cloud và chưa có payment provider thực tế.
+
 ## 2.3.0 (nhánh upgrade/v2.3 — ổn định và demo)
 
 - Sửa GitHub Actions Android SDK setup và tên gói Android API 37.0 để build APK debug.

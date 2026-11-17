@@ -258,3 +258,72 @@ def test_court_name_is_normalized(api):
     record = c.post('/v1/admin/courts',headers=admin(),json={'name':'  San A  ','price_hour':100}).json()
     assert record['name'] == 'San A'
     assert c.post('/v1/admin/courts',headers=admin(),json={'name':'San A','price_hour':100}).status_code == 409
+
+
+def test_expired_pending_hold_cannot_be_resurrected_by_admin(api):
+    c, application = api
+    c.post('/v1/admin/courts', headers=admin(), json={'name': 'San B', 'price_hour': 90000})
+    first = c.post('/v1/public/bookings', json=book(today())).json()
+    with application.connection() as db:
+        db.execute("UPDATE bookings SET hold_until='2000-01-01T00:00:00+00:00' WHERE id=?", (first['id'],))
+    late_confirmation = c.post(f"/v1/admin/bookings/{first['id']}/status",
+                               headers=admin(), json={'status': 'CONFIRMED'})
+    assert late_confirmation.status_code == 409
+    second = c.post('/v1/public/bookings', json=book(today()))
+    assert second.status_code == 201
+    with application.connection() as db:
+        old = db.execute('SELECT status FROM bookings WHERE id=?', (first['id'],)).fetchone()
+        new = db.execute('SELECT status FROM bookings WHERE id=?', (second.json()['id'],)).fetchone()
+    assert old['status'] == 'CANCELLED' and new['status'] == 'PENDING'
+
+
+def test_availability_uses_booking_date_window(api):
+    c, _ = api
+    c.post('/v1/admin/courts', headers=admin(), json={'name': 'San B', 'price_hour': 90000})
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    current_day = datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date()
+    for invalid_day in (current_day - timedelta(days=1), current_day + timedelta(days=366)):
+        r = c.get('/v1/public/availability', params={'court_id': 1, 'date': invalid_day.isoformat()})
+        assert r.status_code == 422, (invalid_day, r.status_code)
+    good = c.get('/v1/public/availability', params={'court_id': 1, 'date': today()})
+    assert good.status_code == 200
+
+
+def test_public_rate_limiter_bounded_memory_and_retry_after(api):
+    from types import SimpleNamespace
+    c, application = api
+    for ip_num in range(4300):
+        application.limit_public_bookings(SimpleNamespace(client=SimpleNamespace(host=f'demo-{ip_num}')))
+    assert len(application._public_attempts) <= 4096
+    for _ in range(30):
+        application.limit_public_bookings(SimpleNamespace(client=SimpleNamespace(host='repeat-client')))
+    with pytest.raises(application.HTTPException) as exc:
+        application.limit_public_bookings(SimpleNamespace(client=SimpleNamespace(host='repeat-client')))
+    assert exc.value.status_code == 429
+    assert exc.value.headers['Retry-After'] == '60'
+
+
+def test_daily_and_expiring_indexes_exist(api):
+    c, application = api
+    with application.connection() as db:
+        indexes = {r['name'] for r in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert 'idx_bookings_day' in indexes
+    assert 'idx_bookings_expirable' in indexes
+
+
+def test_admin_booking_pagination_preserves_default_contract(api):
+    c, _ = api
+    c.post('/v1/admin/courts', headers=admin(), json={'name': 'San C', 'price_hour': 100000})
+    first = c.post('/v1/admin/bookings', headers=admin(), json=book(today(),'18:00','19:00')).json()
+    second = c.post('/v1/admin/bookings', headers=admin(), json=book(today(),'19:00','20:00')).json()
+    full = c.get('/v1/admin/bookings', headers=admin())
+    assert full.status_code == 200
+    assert [row['id'] for row in full.json()] == [first['id'], second['id']]
+    page1 = c.get('/v1/admin/bookings', headers=admin(), params={'limit':1,'offset':0})
+    page2 = c.get('/v1/admin/bookings', headers=admin(), params={'limit':1,'offset':1})
+    assert [row['id'] for row in page1.json()] == [first['id']]
+    assert [row['id'] for row in page2.json()] == [second['id']]
+    assert not any('public_token' in row for row in page1.json() + page2.json())
+    assert c.get('/v1/admin/bookings', headers=admin(), params={'limit':201}).status_code == 422
+    assert c.get('/v1/admin/bookings', headers=admin(), params={'offset':-1}).status_code == 422

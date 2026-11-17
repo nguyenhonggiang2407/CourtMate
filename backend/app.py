@@ -15,14 +15,14 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager, asynccontextmanager
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from datetime import date as Date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -40,10 +40,14 @@ async def lifespan(_app: FastAPI):
     init_db()
     yield
 
-app = FastAPI(title="CourtMate Cloud pilot", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="CourtMate Cloud pilot", version="0.3.1", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
-_public_attempts = defaultdict(deque)
+# Bounded per-process demo limiter; production needs shared Redis/WAF.
+_public_attempts: OrderedDict[str, deque[float]] = OrderedDict()
 _public_lock = threading.Lock()
+PUBLIC_LIMIT_WINDOW_S = 60
+PUBLIC_LIMIT_REQUESTS = 30
+PUBLIC_LIMIT_MAX_CLIENTS = 4096
 
 
 @app.middleware("http")
@@ -61,11 +65,24 @@ def limit_public_bookings(request: Request):
     ip = request.client.host if request.client else "unknown"
     now = time.monotonic()
     with _public_lock:
-        history = _public_attempts[ip]
-        while history and now - history[0] > 60:
+        while _public_attempts:
+            oldest_ip, oldest_history = next(iter(_public_attempts.items()))
+            if oldest_history and now - oldest_history[-1] < PUBLIC_LIMIT_WINDOW_S:
+                break
+            _public_attempts.popitem(last=False)
+        history = _public_attempts.get(ip)
+        if history is None:
+            if len(_public_attempts) >= PUBLIC_LIMIT_MAX_CLIENTS:
+                _public_attempts.popitem(last=False)
+            history = deque()
+            _public_attempts[ip] = history
+        else:
+            _public_attempts.move_to_end(ip)
+        while history and now - history[0] >= PUBLIC_LIMIT_WINDOW_S:
             history.popleft()
-        if len(history) >= 30:
-            raise HTTPException(429, "Quá nhiều yêu cầu. Vui lòng thử lại sau")
+        if len(history) >= PUBLIC_LIMIT_REQUESTS:
+            raise HTTPException(429, "Quá nhiều yêu cầu. Vui lòng thử lại sau",
+                                headers={"Retry-After": "60"})
         history.append(now)
 
 
@@ -106,6 +123,9 @@ def init_db():
             hold_until TEXT NOT NULL,
             updated_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_booking_slot ON bookings(court_id,date,status,start,end);
+        CREATE INDEX IF NOT EXISTS idx_bookings_day ON bookings(date,start,id);
+        CREATE INDEX IF NOT EXISTS idx_bookings_expirable ON bookings(hold_until)
+            WHERE status='PENDING' AND payment_status!='PAID';
         CREATE TABLE IF NOT EXISTS payment_events (
             event_id TEXT PRIMARY KEY, booking_id INTEGER NOT NULL REFERENCES bookings(id),
             provider_reference TEXT NOT NULL, amount INTEGER NOT NULL,
@@ -244,6 +264,9 @@ def availability(court_id: int, date: str):
             raise ValueError()
     except ValueError:
         raise HTTPException(422, "Ngày không hợp lệ")
+    current_day = datetime.now(VIETNAM_TZ).date()
+    if not current_day <= parsed <= current_day + timedelta(days=365):
+        raise HTTPException(422, "Ngày ngoài giới hạn đặt sân 0–365 ngày")
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -422,12 +445,18 @@ def admin_summary(date: str | None = None):
 
 
 @app.get("/v1/admin/bookings", dependencies=[Depends(require_admin)])
-def admin_bookings(date: str | None = None):
+def admin_bookings(date: str | None = None,
+                   limit: int = Query(default=200, ge=1, le=200),
+                   offset: int = Query(default=0, ge=0, le=100_000)):
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
             expire_holds(db)
-            sql = "SELECT b.*, c.name AS court_name FROM bookings b JOIN courts c ON b.court_id=c.id"
+            sql = ("SELECT b.id,b.court_id,b.date,b.start,b.end,b.customer_name,"
+                   "b.customer_phone,b.amount,b.status,b.payment_status,"
+                   "b.payment_reference,b.payment_url,b.paid_at,b.created_at,"
+                   "b.hold_until,b.updated_at,c.name AS court_name "
+                   "FROM bookings b JOIN courts c ON b.court_id=c.id")
             params = []
             if date:
                 try:
@@ -437,11 +466,10 @@ def admin_bookings(date: str | None = None):
                     raise HTTPException(422, "Ngày phải là YYYY-MM-DD")
                 sql += " WHERE b.date=?"
                 params.append(date)
-            sql += " ORDER BY b.date DESC, b.start ASC, b.id DESC LIMIT 200"
+            sql += " ORDER BY b.date DESC, b.start ASC, b.id DESC LIMIT ? OFFSET ?"
+            params.extend((limit, offset))
             rows = [dict(r) for r in db.execute(sql, params)]
-            # Public access tokens are customer secrets, never return them in staff lists.
-            for row in rows:
-                row.pop("public_token", None)
+            # Public access tokens are never selected from SQLite.
             db.execute("COMMIT")
             return rows
         except Exception:
@@ -465,19 +493,22 @@ def update_booking(booking_id: int, payload: BookingStatus):
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            expire_holds(db)
             row = db.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
             if not row:
                 raise HTTPException(404, "Không tìm thấy lịch")
             if row["payment_status"] in ("PAID", "BANK_PENDING") and payload.status == "CANCELLED":
                 raise HTTPException(409, "Lịch đang/đã thanh toán; cần hoàn tiền hoặc đối soát riêng")
             if row["status"] == "CANCELLED" and payload.status == "CONFIRMED":
+                db.execute("COMMIT")
                 raise HTTPException(409, "Không mở lại lịch đã hủy")
             db.execute("UPDATE bookings SET status=?, updated_at=? WHERE id=?",
                        (payload.status, iso_now(), booking_id))
             db.execute("COMMIT")
             return {"id":booking_id, "status":payload.status}
         except Exception:
-            db.execute("ROLLBACK")
+            if db.in_transaction:
+                db.execute("ROLLBACK")
             raise
 
 
