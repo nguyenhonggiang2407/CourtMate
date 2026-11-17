@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -40,7 +40,7 @@ async def lifespan(_app: FastAPI):
     init_db()
     yield
 
-app = FastAPI(title="CourtMate Cloud pilot", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="CourtMate Cloud pilot", version="0.3.1", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 # Bounded per-process demo limiter; production needs shared Redis/WAF.
 _public_attempts: OrderedDict[str, deque[float]] = OrderedDict()
@@ -123,6 +123,9 @@ def init_db():
             hold_until TEXT NOT NULL,
             updated_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_booking_slot ON bookings(court_id,date,status,start,end);
+        CREATE INDEX IF NOT EXISTS idx_bookings_day ON bookings(date,start,id);
+        CREATE INDEX IF NOT EXISTS idx_bookings_expirable ON bookings(hold_until)
+            WHERE status='PENDING' AND payment_status!='PAID';
         CREATE TABLE IF NOT EXISTS payment_events (
             event_id TEXT PRIMARY KEY, booking_id INTEGER NOT NULL REFERENCES bookings(id),
             provider_reference TEXT NOT NULL, amount INTEGER NOT NULL,
@@ -261,6 +264,9 @@ def availability(court_id: int, date: str):
             raise ValueError()
     except ValueError:
         raise HTTPException(422, "Ngày không hợp lệ")
+    current_day = datetime.now(VIETNAM_TZ).date()
+    if not current_day <= parsed <= current_day + timedelta(days=365):
+        raise HTTPException(422, "Ngày ngoài giới hạn đặt sân 0–365 ngày")
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -439,12 +445,18 @@ def admin_summary(date: str | None = None):
 
 
 @app.get("/v1/admin/bookings", dependencies=[Depends(require_admin)])
-def admin_bookings(date: str | None = None):
+def admin_bookings(date: str | None = None,
+                   limit: int = Query(default=200, ge=1, le=200),
+                   offset: int = Query(default=0, ge=0, le=100_000)):
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
             expire_holds(db)
-            sql = "SELECT b.*, c.name AS court_name FROM bookings b JOIN courts c ON b.court_id=c.id"
+            sql = ("SELECT b.id,b.court_id,b.date,b.start,b.end,b.customer_name,"
+                   "b.customer_phone,b.amount,b.status,b.payment_status,"
+                   "b.payment_reference,b.payment_url,b.paid_at,b.created_at,"
+                   "b.hold_until,b.updated_at,c.name AS court_name "
+                   "FROM bookings b JOIN courts c ON b.court_id=c.id")
             params = []
             if date:
                 try:
@@ -454,11 +466,10 @@ def admin_bookings(date: str | None = None):
                     raise HTTPException(422, "Ngày phải là YYYY-MM-DD")
                 sql += " WHERE b.date=?"
                 params.append(date)
-            sql += " ORDER BY b.date DESC, b.start ASC, b.id DESC LIMIT 200"
+            sql += " ORDER BY b.date DESC, b.start ASC, b.id DESC LIMIT ? OFFSET ?"
+            params.extend((limit, offset))
             rows = [dict(r) for r in db.execute(sql, params)]
-            # Public access tokens are customer secrets, never return them in staff lists.
-            for row in rows:
-                row.pop("public_token", None)
+            # Public access tokens are never selected from SQLite.
             db.execute("COMMIT")
             return rows
         except Exception:
