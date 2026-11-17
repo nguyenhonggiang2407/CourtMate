@@ -57,7 +57,7 @@ Bản nâng cấp này sửa lỗi xác nhận giữ chỗ quá hạn; giới h�
 - API `GET /v1/admin/changes?after=0&limit=100` trả sự kiện sân/lịch theo cursor `seq` tăng dần; một bản ghi được đọc từ trạng thái **hiện tại**, không phải event-sourcing hoặc lịch sử giao dịch.
 - API nội bộ tạo lịch nhận `client_request_id` tùy chọn để gửi lại an toàn khi mạng bị gián đoạn. Backend giữ nguyên quy tắc chặn hai lịch trùng sân/giờ.
 - Android Cloud thêm bộ chọn sân, ngày/giờ và phân trang 100 lịch; không tự đưa lịch offline vào cloud.
-- Kiểm thử backend bổ sung các trường hợp phân trang feed, quyền Staff, dữ liệu cũ, lịch hết hạn, khóa trùng từ nhiều request và trường hợp xóa. **37 bài đạt tại môi trường phát triển**; cần xem GitHub CI để xác nhận build APK nhánh mới.
+- Kiểm thử backend bổ sung các trường hợp phân trang feed, quyền Staff, dữ liệu cũ, lịch hết hạn, khóa trùng từ nhiều request và trường hợp xóa. **38 bài đạt tại môi trường phát triển**; cần xem GitHub CI để xác nhận build APK nhánh mới.
 - [Ghi chú triển khai, giới hạn và checklist 2.5](docs/RELEASE_2_5.md).
 
 ## Chạy Android

@@ -453,6 +453,8 @@ def create_booking(payload: BookingCreate, public: bool):
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            # Update expired holds before replaying a previous response.
+            expire_holds(db)
             if not public and payload.client_request_id:
                 prior = db.execute("SELECT * FROM bookings WHERE client_request_id=?",
                                    (payload.client_request_id,)).fetchone()
@@ -462,7 +464,6 @@ def create_booking(payload: BookingCreate, public: bool):
                         raise HTTPException(409, "Mã gửi lại đã được dùng cho một lịch khác")
                     db.execute("COMMIT")
                     return booking_to_dict(prior)
-            expire_holds(db)
             court = db.execute("SELECT * FROM courts WHERE id=? AND active=1", (payload.court_id,)).fetchone()
             if court is None:
                 raise HTTPException(404, "Sân không tồn tại hoặc đang bảo trì")

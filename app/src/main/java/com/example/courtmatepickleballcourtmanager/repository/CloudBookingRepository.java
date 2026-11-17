@@ -172,7 +172,13 @@ public final class CloudBookingRepository {
                 + "&limit=" + limit, null));
     }
     public JSONObject create(JSONObject values) throws Exception {
-        return new JSONObject(request("POST", "/v1/admin/bookings", values));
+        try {
+            return new JSONObject(request("POST", "/v1/admin/bookings", values));
+        } catch (java.io.IOException intermittent) {
+            // Retry only when the same request key makes network replay safe.
+            if (!values.has("client_request_id")) throw intermittent;
+            return new JSONObject(request("POST", "/v1/admin/bookings", values));
+        }
     }
     public JSONObject updateStatus(int id, String status) throws Exception {
         // PATCH support added to backend; do not use GET to change booking state.

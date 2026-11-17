@@ -610,3 +610,20 @@ def test_change_feed_delete_tombstones(api):
     feed=c.get('/v1/admin/changes',headers=admin(),params={'after':checkpoint}).json()
     assert [e['action'] for e in feed['events']]==['DELETE','DELETE']
     assert all(e['record'] is None for e in feed['events'])
+
+
+def test_retry_expired_hold_reflects_cancelled_status(api):
+    c, application = api
+    c.post('/v1/admin/courts', headers=admin(), json={'name':'Sân A','price_hour':100000})
+    payload={**book(today()), 'client_request_id':'expired-hold-retry-unique-001'}
+    created=c.post('/v1/admin/bookings',headers=admin(),json=payload).json()
+    with application.connection() as db:
+        db.execute("UPDATE bookings SET status='PENDING',hold_until='2000-01-01T00:00:00+00:00' WHERE id=?",
+                   (created['id'],))
+    replay=c.post('/v1/admin/bookings',headers=admin(),json=payload)
+    assert replay.status_code==201
+    assert replay.json()['id']==created['id']
+    assert replay.json()['status']=='CANCELLED'
+    assert c.get('/v1/admin/bookings',headers=admin()).json()[0]['status']=='CANCELLED'
+    assert c.post('/v1/admin/bookings',headers=admin(),json={
+        **book(today()),'client_request_id':'new-request-after-old-expiry'}).status_code==201
