@@ -15,7 +15,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager, asynccontextmanager
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from datetime import date as Date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -42,8 +42,12 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="CourtMate Cloud pilot", version="0.3.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
-_public_attempts = defaultdict(deque)
+# Bounded per-process demo limiter; production needs shared Redis/WAF.
+_public_attempts: OrderedDict[str, deque[float]] = OrderedDict()
 _public_lock = threading.Lock()
+PUBLIC_LIMIT_WINDOW_S = 60
+PUBLIC_LIMIT_REQUESTS = 30
+PUBLIC_LIMIT_MAX_CLIENTS = 4096
 
 
 @app.middleware("http")
@@ -61,11 +65,24 @@ def limit_public_bookings(request: Request):
     ip = request.client.host if request.client else "unknown"
     now = time.monotonic()
     with _public_lock:
-        history = _public_attempts[ip]
-        while history and now - history[0] > 60:
+        while _public_attempts:
+            oldest_ip, oldest_history = next(iter(_public_attempts.items()))
+            if oldest_history and now - oldest_history[-1] < PUBLIC_LIMIT_WINDOW_S:
+                break
+            _public_attempts.popitem(last=False)
+        history = _public_attempts.get(ip)
+        if history is None:
+            if len(_public_attempts) >= PUBLIC_LIMIT_MAX_CLIENTS:
+                _public_attempts.popitem(last=False)
+            history = deque()
+            _public_attempts[ip] = history
+        else:
+            _public_attempts.move_to_end(ip)
+        while history and now - history[0] >= PUBLIC_LIMIT_WINDOW_S:
             history.popleft()
-        if len(history) >= 30:
-            raise HTTPException(429, "Quá nhiều yêu cầu. Vui lòng thử lại sau")
+        if len(history) >= PUBLIC_LIMIT_REQUESTS:
+            raise HTTPException(429, "Quá nhiều yêu cầu. Vui lòng thử lại sau",
+                                headers={"Retry-After": "60"})
         history.append(now)
 
 
