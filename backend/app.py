@@ -465,19 +465,22 @@ def update_booking(booking_id: int, payload: BookingStatus):
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            expire_holds(db)
             row = db.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
             if not row:
                 raise HTTPException(404, "Không tìm thấy lịch")
             if row["payment_status"] in ("PAID", "BANK_PENDING") and payload.status == "CANCELLED":
                 raise HTTPException(409, "Lịch đang/đã thanh toán; cần hoàn tiền hoặc đối soát riêng")
             if row["status"] == "CANCELLED" and payload.status == "CONFIRMED":
+                db.execute("COMMIT")
                 raise HTTPException(409, "Không mở lại lịch đã hủy")
             db.execute("UPDATE bookings SET status=?, updated_at=? WHERE id=?",
                        (payload.status, iso_now(), booking_id))
             db.execute("COMMIT")
             return {"id":booking_id, "status":payload.status}
         except Exception:
-            db.execute("ROLLBACK")
+            if db.in_transaction:
+                db.execute("ROLLBACK")
             raise
 
 
